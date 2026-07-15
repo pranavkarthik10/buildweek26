@@ -1,0 +1,6 @@
+name = "studydeck"
+compatibility_date = "2026-04-28"
+
+[[r2_buckets]]
+binding = "studydeck"
+bucket_name = "studydeck"

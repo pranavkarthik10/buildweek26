@@ -1,0 +1,79 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model User {
+  id            String    @id // Application user id
+  email         String    @unique
+  name          String?
+  image         String?
+  decks         Deck[]
+  studySessions StudySession[]
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+model Deck {
+  id            String   @id @default(cuid())
+  userId        String
+  title         String
+  courseName    String?
+  summary       String?
+  studyStrategy String?
+  pdfUrl        String
+  totalSlides   Int
+  slides        String    // JSON stringified LectureSlide[]
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  studySessions StudySession[]
+}
+
+model StudySession {
+  id              String          @id @default(cuid())
+  userId          String
+  deckId          String
+  teachingFormat  TeachingFormat  @default(lecture)
+  customInstructions String?
+  currentSlide    Int             @default(0)
+  currentCue      Int             @default(0)
+  status          SessionStatus   @default(active)
+  progressPercent Int             @default(0)
+  slideProgress   SlideProgress[]
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  completedAt     DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deck Deck @relation(fields: [deckId], references: [id], onDelete: Cascade)
+}
+
+model SlideProgress {
+  id           String   @id @default(cuid())
+  sessionId    String
+  slideIndex   Int
+  completed    Boolean  @default(false)
+  timeSpentSec Int      @default(0)
+  updatedAt    DateTime @updatedAt
+
+  session StudySession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, slideIndex])
+}
+
+enum SessionStatus {
+  active
+  paused
+  completed
+}
+
+enum TeachingFormat {
+  lecture
+  small_class
+  tutoring
+}
