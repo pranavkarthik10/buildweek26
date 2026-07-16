@@ -5,6 +5,7 @@ import { validateBoardTransaction } from "@/lib/whiteboard-transaction";
 import {
   hasExplicitVisualIntent,
   isTutorToolName,
+  resolveSlideIndex,
   searchCourseMaterial,
   type TutorContext,
   type TutorEffect,
@@ -43,13 +44,13 @@ export async function executeTutorTool(
       }
       case "navigate_slide": {
         const args = parsed.data as { slideIndex: number };
-        const slideIndex = args.slideIndex;
+        const slideIndex = resolveSlideIndex(context.deck, args.slideIndex, context.learnerQuestion);
         if (slideIndex >= context.deck.slides.length) return failedTool(name, "Slide is outside the current deck.");
         return completedTool(name, { ok: true, slideIndex }, [{ type: name, slideIndex }]);
       }
       case "point_to_slide": {
         const args = parsed.data as { slideIndex?: number; x: number; y: number; label: string };
-        const slideIndex = args.slideIndex ?? context.currentSlideIndex;
+        const slideIndex = resolveSlideIndex(context.deck, args.slideIndex ?? context.currentSlideIndex, context.learnerQuestion);
         if (slideIndex >= context.deck.slides.length) return failedTool(name, "Slide is outside the current deck.");
         return completedTool(name, { ok: true, slideIndex, x: args.x, y: args.y, label: args.label }, [{
           type: name,
@@ -77,7 +78,7 @@ export async function executeTutorTool(
         });
       }
       case "mutate_whiteboard": {
-        const args = parsed.data as { transactionId: string; baseVersion: number; ops: unknown[]; explanation?: string };
+        const args = parsed.data as { transactionId: string; baseVersion: number; ops: unknown[]; explanation?: string; presentation?: "split" | "whiteboard"; presentationReason?: "single_edit" | "multi_step" | "artifact_playback" | "user_requested" };
         if (!context.board) return failedTool(name, "No active whiteboard is available.");
         const validation = validateBoardTransaction(args, context.board.version);
         if (!validation.ok) {
@@ -89,8 +90,10 @@ export async function executeTutorTool(
           baseVersion: validation.transaction.baseVersion,
         }, [{
           type: name,
-          transaction: validation.transaction,
-          explanation: args.explanation,
+           transaction: validation.transaction,
+           explanation: args.explanation,
+           presentation: args.presentation ?? "split",
+           presentationReason: args.presentationReason ?? "single_edit",
         }]);
       }
       case "search_course_material": {
@@ -119,7 +122,12 @@ export async function executeTutorTool(
           type: name,
           jobId: artifact.jobId,
           status: artifact.status,
+          kind: artifact.kind,
+          engine: artifact.engine,
           url: artifact.url,
+          specUrl: `/api/render-jobs/${artifact.jobId}/spec`,
+          audioUrl: artifact.audioUrl,
+          captions: artifact.captions,
         };
         return completedTool(name, { ok: true, ...artifact }, [effect]);
       }
@@ -167,6 +175,18 @@ async function createExplainerArtifact(input: ExplainerRequestInput) {
   return {
     jobId: artifact.id,
     status: artifact.status,
-    url: artifact.artifactUrl ?? artifact.previewUrl ?? undefined,
+    kind: artifact.kind,
+    engine: artifact.engine,
+    url: artifact.artifactUrl ?? `/api/render-jobs/${artifact.id}/spec`,
+    audioUrl: artifact.audioUrl ?? undefined,
+    captions: artifact.captions ? safelyParseJson(artifact.captions) : undefined,
   };
+}
+
+function safelyParseJson(value: string) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return undefined;
+  }
 }

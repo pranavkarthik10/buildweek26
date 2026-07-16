@@ -146,6 +146,7 @@ type Props = {
   realtimeState?: RealtimeTutorState;
   onRealtimeStateChange?: (state: RealtimeTutorState) => void;
   onRealtimeFallback?: () => void;
+  onRealtimeResumeLecture?: (options?: { advance?: boolean }) => void;
   onRealtimeFocus?: (focus: TeachingFocus) => void;
   onRealtimePoint?: (point: { x: number; y: number; label: string }) => void;
   onRealtimeJumpToSlide?: (slideIndex: number) => void;
@@ -200,6 +201,7 @@ export function LectureWorkspace({
   realtimeState = "idle",
   onRealtimeStateChange,
   onRealtimeFallback,
+  onRealtimeResumeLecture,
   onRealtimeFocus,
   onRealtimePoint,
   onRealtimeJumpToSlide,
@@ -496,6 +498,11 @@ export function LectureWorkspace({
             connectRequest={realtimeConnectRequest}
             onStateChange={onRealtimeStateChange}
             onFallback={onRealtimeFallback}
+            onResumeLecture={(options) => {
+              setInputMode("text");
+              setDrawerOpen(false);
+              onRealtimeResumeLecture?.(options);
+            }}
             onFocus={onRealtimeFocus}
             onPoint={onRealtimePoint}
             onJumpToSlide={onRealtimeJumpToSlide ?? onJumpToSlide}
@@ -660,17 +667,17 @@ export function LectureWorkspace({
                 </div>
               ) : null}
 
-              {showWhiteboard ? (
-                <WhiteboardPanel
-                  content={whiteboardContent}
-                  canvasRef={canvasRef}
-                  initialVersion={initialBoardVersion}
-                  onSnapshotChange={onWhiteboardSnapshotChange}
-                  status={whiteboardStatus}
-                  onClose={onWhiteboardClose}
-                  className="h-[min(68vh,calc(100vh-13rem))]"
-                />
-              ) : null}
+              <WhiteboardPanel
+                content={whiteboardContent}
+                canvasRef={canvasRef}
+                initialVersion={initialBoardVersion}
+                onSnapshotChange={onWhiteboardSnapshotChange}
+                status={whiteboardStatus}
+                onClose={onWhiteboardClose}
+                className={showWhiteboard
+                  ? "h-[min(68vh,calc(100vh-13rem))]"
+                  : "!absolute inset-0 z-[-1] h-full w-full opacity-0 pointer-events-none"}
+              />
 
               <div className="col-span-full flex w-full items-center justify-between gap-4 text-xs text-white/35">
                 <div className="min-w-0">

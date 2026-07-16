@@ -1,4 +1,4 @@
-import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 
 type R2Config = {
   accountId: string;
@@ -122,4 +122,16 @@ export async function objectExists(key: string) {
   } catch {
     return false;
   }
+}
+
+export async function deleteObject(key: string) {
+  const config = getR2Config();
+  if (!config) return false;
+  client ??= new S3Client({
+    region: "auto",
+    endpoint: `https://${config.accountId}.r2.cloudflarestorage.com`,
+    credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
+  });
+  await client.send(new DeleteObjectCommand({ Bucket: config.bucketName, Key: key }));
+  return true;
 }

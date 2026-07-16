@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { LectureDeck, LectureSlide } from "@/lib/aiprof-types";
 import type { WhiteboardCanvasAction, TeachingFocus, TutorQuestionResult } from "@/lib/whiteboard-types";
 import type { BoardTransaction } from "@/lib/whiteboard-transaction";
+import type { CaptionBeat, VisualArtifactKind, VisualEngine } from "@/lib/explainer-types";
 
 export const tutorToolNames = [
   "set_teaching_focus",
@@ -59,8 +60,8 @@ export type TutorEffect =
   | { type: "set_teaching_focus"; mode: TeachingFocus }
   | { type: "navigate_slide"; slideIndex: number }
   | { type: "point_to_slide"; slideIndex: number; x: number; y: number; label: string }
-  | { type: "mutate_whiteboard"; transaction: BoardTransaction; explanation?: string }
-  | { type: "create_micro_explainer"; jobId: string; status: string; url?: string };
+  | { type: "mutate_whiteboard"; transaction: BoardTransaction; explanation?: string; presentation?: "split" | "whiteboard"; presentationReason?: "single_edit" | "multi_step" | "artifact_playback" | "user_requested" }
+  | { type: "create_micro_explainer"; jobId: string; status: string; kind?: VisualArtifactKind; engine?: VisualEngine; url?: string; specUrl?: string; audioUrl?: string; captions?: CaptionBeat[] };
 
 export type TutorToolTrace = {
   name: TutorToolName;
@@ -128,6 +129,8 @@ const mutateBoardSchema = z.object({
   transactionId: z.string().trim().min(1).max(96),
   baseVersion: z.number().int().min(0),
   explanation: z.string().max(240).optional(),
+  presentation: z.enum(["split", "whiteboard"]).default("split"),
+  presentationReason: z.enum(["single_edit", "multi_step", "artifact_playback", "user_requested"]).default("single_edit"),
   ops: z.array(boardOperationSchema).min(1).max(12),
 }).strict();
 const searchSchema = z.object({ query: z.string().trim().min(1).max(240), limit: z.number().int().min(1).max(5).optional() }).strict();
@@ -212,6 +215,8 @@ export function getTutorToolDeclarations(): FunctionDeclaration[] {
         transactionId: { type: "string", minLength: 1, maxLength: 96 },
         baseVersion: { type: "integer", minimum: 0 },
         explanation: { type: "string", maxLength: 240 },
+        presentation: { type: "string", enum: ["split", "whiteboard"] },
+        presentationReason: { type: "string", enum: ["single_edit", "multi_step", "artifact_playback", "user_requested"] },
         ops: {
           type: "array",
           minItems: 1,
@@ -350,6 +355,17 @@ export function searchCourseMaterial(deck: LectureDeck, query: string, limit = 3
     .filter((result) => result.score > 0)
     .sort((a, b) => b.score - a.score || a.index - b.index)
     .slice(0, Math.max(1, Math.min(5, limit)));
+}
+
+/** Resolve the model's zero-based tool index against the learner-facing page number. */
+export function resolveSlideIndex(deck: LectureDeck, requestedIndex: number, learnerText = "") {
+  const bounded = Math.max(0, Math.min(deck.slides.length - 1, requestedIndex));
+  const match = learnerText.match(/\b(?:page|slide)(?:\s+number)?\s*#?\s*(\d+)\b/i);
+  if (!match) return bounded;
+  const visiblePage = Number(match[1]);
+  if (!Number.isSafeInteger(visiblePage)) return bounded;
+  const visibleIndex = deck.slides.findIndex((slide) => slide.slideNumber === visiblePage);
+  return visibleIndex >= 0 ? visibleIndex : bounded;
 }
 
 export function boardContextForPrompt(board?: TutorBoardContext) {

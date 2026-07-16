@@ -93,10 +93,13 @@ model Artifact {
   sessionId   String?
   jobKey      String          @unique
   status      RenderJobStatus @default(preview)
-  engine      RenderEngine    @default(hyperframes)
+  kind        VisualArtifactKind @default(interactive)
+  engine      RenderEngine    @default(diagram)
   spec        String
-  previewUrl  String?
   artifactUrl String?
+  audioUrl    String?
+  captions    String?
+  specVersion Int             @default(2)
   error       String?
   createdAt   DateTime        @default(now())
   updatedAt   DateTime        @updatedAt
@@ -193,6 +196,13 @@ enum RenderJobStatus {
 }
 
 enum RenderEngine {
-  hyperframes
+  diagram
+  jsxgraph
+  plotly
   manim
+}
+
+enum VisualArtifactKind {
+  interactive
+  video
 }

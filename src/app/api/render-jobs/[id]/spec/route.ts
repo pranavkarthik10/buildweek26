@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { prisma } from "@/lib/db";
 import { ensureLocalUser } from "@/lib/local-user";
+import { validateVisualSpec } from "@/lib/visual-spec";
 
 export const runtime = "nodejs";
 
@@ -20,19 +21,22 @@ export async function GET(
         { jobKey: id, sessionId: null },
       ],
     },
-    select: { id: true, jobKey: true, status: true, kind: true, engine: true, artifactUrl: true, audioUrl: true, captions: true, error: true, updatedAt: true },
+    select: { id: true, kind: true, engine: true, spec: true, artifactUrl: true, audioUrl: true, captions: true },
   });
-
   if (!artifact) return NextResponse.json({ error: "Artifact not found." }, { status: 404 });
-  return NextResponse.json({
-    ...artifact,
-    url: artifact.artifactUrl ?? `/api/render-jobs/${artifact.id}/spec`,
-    specUrl: `/api/render-jobs/${artifact.id}/spec`,
-    captions: parseCaptions(artifact.captions),
-  });
-}
 
-function parseCaptions(value: string | null) {
-  if (!value) return undefined;
-  try { return JSON.parse(value); } catch { return undefined; }
+  try {
+    const spec = validateVisualSpec(JSON.parse(artifact.spec));
+    return NextResponse.json({
+      id: artifact.id,
+      kind: artifact.kind,
+      engine: artifact.engine,
+      spec,
+      artifactUrl: artifact.artifactUrl,
+      audioUrl: artifact.audioUrl,
+      captions: artifact.captions ? JSON.parse(artifact.captions) : undefined,
+    }, { headers: { "Cache-Control": "private, max-age=60" } });
+  } catch {
+    return NextResponse.json({ error: "Artifact spec is invalid." }, { status: 500 });
+  }
 }

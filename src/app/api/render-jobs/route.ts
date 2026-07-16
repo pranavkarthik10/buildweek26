@@ -77,9 +77,11 @@ function toSummary(
     id: string;
     jobKey: string;
     status: string;
+    kind: string;
     engine: string;
-    previewUrl: string | null;
     artifactUrl: string | null;
+    audioUrl: string | null;
+    captions: string | null;
     error: string | null;
   },
   spec: ReturnType<typeof buildExplainerSpec>,
@@ -89,11 +91,19 @@ function toSummary(
     jobId: artifact.id,
     jobKey: artifact.jobKey,
     status: artifact.status as RenderArtifactSummary["status"],
+    kind: artifact.kind as RenderArtifactSummary["kind"],
     engine: artifact.engine as RenderArtifactSummary["engine"],
-    previewUrl: artifact.previewUrl ?? undefined,
     artifactUrl: artifact.artifactUrl ?? undefined,
-    url: artifact.artifactUrl ?? artifact.previewUrl ?? "",
+    audioUrl: artifact.audioUrl ?? undefined,
+    captions: parseCaptions(artifact.captions),
+    specUrl: `/api/render-jobs/${artifact.id}/spec`,
+    url: artifact.artifactUrl ?? `/api/render-jobs/${artifact.id}/spec`,
     error: artifact.error ?? undefined,
     spec,
   };
+}
+
+function parseCaptions(value: string | null) {
+  if (!value) return undefined;
+  try { return JSON.parse(value) as RenderArtifactSummary["captions"]; } catch { return undefined; }
 }

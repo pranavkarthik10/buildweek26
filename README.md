@@ -17,7 +17,7 @@ studydeck turns a PDF lecture deck into a structured lesson and interactive teac
 - Gemini for document ingestion, structured lesson planning, TTS fallback, and explainer specs
 - OpenAI `gpt-realtime-2.1-mini` for interruptible WebRTC tutoring and tool calls
 - tldraw for the interactive whiteboard
-- HyperFrames deterministic HTML/GSAP rendering, with a safe Manim-target fallback for math explainers
+- Manim Community Cairo rendering for narrated math videos, plus native tldraw diagrams, JSXGraph geometry, and Plotly charts
 
 ## Run locally
 
@@ -31,7 +31,7 @@ For the clean CI path use `npm ci && npm run build`; Prisma Client generation is
 
 The app reads runtime configuration from environment variables supplied by your shell or hosting provider. Set `GEMINI_API_KEY` for ingestion and the scripted fallback; the general model defaults to `gemini-3.1-flash-lite`. Set `OPENAI_API_KEY` to enable the realtime professor. Set `NEXT_PUBLIC_TLDRAW_LICENSE_KEY` for a deployed tldraw canvas (localhost development does not require one).
 
-For real MP4 explainers in the single-process Build Week demo, set `RENDER_LOCAL_ENABLED=true`; the installed HyperFrames worker validates, renders, duration-checks, and publishes to `public/generated-artifacts/`. For a separate worker, set `REDIS_URL` and `RENDER_QUEUE_ENABLED=true`, then run `npm run render:worker`. Cloudflare R2 variables are optional; when configured, completed MP4s are uploaded there instead of local public storage. `RENDER_DEBUG=true` keeps scratch jobs for inspection.
+For narrated math MP4 explainers in the single-process Build Week demo, set `RENDER_LOCAL_ENABLED=true`; the isolated Manim Community `v0.20.1` worker validates, renders with Cairo, duration-checks, and publishes to `public/generated-artifacts/`. Docker is required for local video rendering. For a separate worker, set `REDIS_URL` and `RENDER_QUEUE_ENABLED=true`, then run `npm run render:worker`. Cloudflare R2 variables are optional; when configured, completed MP4s are uploaded there instead of local public storage. `RENDER_DEBUG=true` keeps scratch jobs for inspection.
 
 ## Cost controls
 
@@ -79,4 +79,4 @@ npm test
 | `POST /api/realtime/session` | Mint a short-lived OpenAI realtime client secret |
 | `POST /api/render-jobs` | Create or reuse a validated visual explainer artifact |
 | `GET /api/render-jobs/:id` | Read explainer job status |
-| `GET /api/render-jobs/:id/preview` | View the deterministic inline explainer preview |
+| `GET /api/render-jobs/:id/spec` | Read an authorized visual specification for a canvas artifact |

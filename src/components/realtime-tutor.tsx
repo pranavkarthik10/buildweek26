@@ -14,6 +14,7 @@ import type { WhiteboardTldrawHandle } from "@/components/whiteboard-tldraw";
 import {
   boundSemanticShapes,
   hasExplicitVisualIntent,
+  resolveSlideIndex,
   searchCourseMaterial,
   tutorToolNames,
   tutorToolSchemas,
@@ -37,10 +38,11 @@ type RealtimeTutorProps = {
   connectRequest?: number;
   onStateChange?: (state: RealtimeTutorState) => void;
   onFallback?: () => void;
+  onResumeLecture?: (options?: { advance?: boolean }) => void;
   onFocus?: (focus: "slides" | "split" | "whiteboard") => void;
   onPoint?: (point: { x: number; y: number; label: string }) => void;
   onJumpToSlide?: (slideIndex: number) => void;
-  onArtifact?: (artifact: { id: string; status: string; url?: string }) => void;
+  onArtifact?: (artifact: { id: string; status: string; url?: string; specUrl?: string; engine?: string; kind?: string }) => void;
 };
 
 export type RealtimeTutorState = "idle" | "connecting" | "connected" | "speaking" | "working" | "error";
@@ -61,6 +63,7 @@ export function RealtimeTutor({
   connectRequest,
   onStateChange,
   onFallback,
+  onResumeLecture,
   onFocus,
   onPoint,
   onJumpToSlide,
@@ -78,6 +81,7 @@ export function RealtimeTutor({
   const connectGenerationRef = useRef(0);
   const connectAbortRef = useRef<AbortController | null>(null);
   const intentionalCloseRef = useRef(false);
+  const handoffOfferedRef = useRef(false);
   const contextRef = useRef({
     deck,
     sessionId,
@@ -114,7 +118,8 @@ export function RealtimeTutor({
       parameters: tutorToolSchemas.point_to_slide,
       timeoutMs: 3_000,
       execute: async ({ slideIndex, x, y, label }) => {
-        const targetSlide = slideIndex ?? contextRef.current.currentSlideIndex;
+        const requestedSlide = slideIndex ?? contextRef.current.currentSlideIndex;
+        const targetSlide = resolveSlideIndex(contextRef.current.deck, requestedSlide, latestUserTranscriptRef.current);
         if (targetSlide >= contextRef.current.deck.slides.length) {
           return { ok: false, error: "Slide is outside the deck." };
         }
@@ -126,14 +131,15 @@ export function RealtimeTutor({
 
     const navigateTool = tool({
       name: tutorToolNames[1],
-      description: "Move to a relevant slide when the student asks about another part of the deck.",
+      description: "Move to a relevant slide. slideIndex is zero-based; visible page 3 is slideIndex 2. Use the learner's visible page number mapping and never add one.",
       parameters: tutorToolSchemas.navigate_slide,
       timeoutMs: 3_000,
       execute: async ({ slideIndex }) => {
         const totalSlides = contextRef.current.deck.slides.length;
-        if (slideIndex >= totalSlides) return { ok: false, error: "Slide is outside the deck." };
-        onJumpToSlide?.(slideIndex);
-        return { ok: true, slideIndex };
+        const targetSlide = resolveSlideIndex(contextRef.current.deck, slideIndex, latestUserTranscriptRef.current);
+        if (targetSlide >= totalSlides) return { ok: false, error: "Slide is outside the deck." };
+        onJumpToSlide?.(targetSlide);
+        return { ok: true, slideIndex: targetSlide, pageNumber: contextRef.current.deck.slides[targetSlide]?.slideNumber };
       },
     });
 
@@ -169,7 +175,8 @@ export function RealtimeTutor({
       description: "Apply an idempotent, version-checked transaction of small validated canvas marks. Preserve student work unless asked to replace it.",
       parameters: tutorToolSchemas.mutate_whiteboard,
       timeoutMs: 5_000,
-      execute: async ({ transactionId, baseVersion, ops, explanation }) => {
+      execute: async ({ transactionId, baseVersion, ops, explanation, presentation }) => {
+        await canvasRef?.current?.whenReady();
         const result = canvasRef?.current?.applyTransaction({
           transactionId,
           baseVersion,
@@ -183,7 +190,7 @@ export function RealtimeTutor({
             currentVersion: result?.currentVersion,
           };
         }
-        onFocus?.("split");
+        onFocus?.(presentation === "whiteboard" ? "whiteboard" : "split");
         return {
           ok: true,
           applied: ops.length,
@@ -236,13 +243,15 @@ export function RealtimeTutor({
           jobId?: string;
           status?: string;
           url?: string;
+          engine?: string;
+          kind?: string;
           error?: string;
         };
         if (!response.ok || !payload.jobId) {
           return { ok: false, error: payload.error ?? "Explainer request failed." };
         }
-        onArtifact?.({ id: payload.jobId, status: payload.status ?? "queued", url: payload.url });
-        return { ok: true, jobId: payload.jobId, status: payload.status ?? "queued", url: payload.url };
+        onArtifact?.({ id: payload.jobId, status: payload.status ?? "queued", url: payload.url, specUrl: `/api/render-jobs/${payload.jobId}/spec`, engine: payload.engine, kind: payload.kind });
+        return { ok: true, jobId: payload.jobId, status: payload.status ?? "queued", url: payload.url, specUrl: `/api/render-jobs/${payload.jobId}/spec`, engine: payload.engine, kind: payload.kind };
       },
     });
 
@@ -408,14 +417,31 @@ export function RealtimeTutor({
         latestUserTranscriptRef.current = latestRealtimeUserTranscript(history);
         for (const item of history) {
           const summary = realtimeMessageTranscript(item);
-          if (!summary || !summary.itemId || persistedHistoryItems.has(summary.itemId)) continue;
-          persistedHistoryItems.add(summary.itemId);
-          persistEvent({
-            kind: "realtime_transcript",
-            role: summary.role,
-            modality: "audio",
-            transcript: summary.transcript,
-          });
+          if (!summary || (summary.itemId && persistedHistoryItems.has(summary.itemId))) continue;
+          if (summary.itemId) {
+            persistedHistoryItems.add(summary.itemId);
+            persistEvent({
+              kind: "realtime_transcript",
+              role: summary.role,
+              modality: "audio",
+              transcript: summary.transcript,
+            });
+          }
+          const normalized = summary.transcript.toLowerCase();
+          if (summary.role === "assistant" && /\b(next slide|next page|next topic|continue the lecture|move on|resume)\b/.test(normalized)) {
+            handoffOfferedRef.current = true;
+          }
+          if (summary.role === "user" && shouldResumeScriptedLecture(normalized, handoffOfferedRef.current)) {
+            handoffOfferedRef.current = false;
+            intentionalCloseRef.current = true;
+            session?.close();
+            sessionRef.current = null;
+            lastSentSlideImageRef.current = "";
+            setState("idle");
+            onResumeLecture?.({ advance: /\b(next slide|next page|next topic|move to the next)\b/.test(normalized) });
+            queueMicrotask(() => { intentionalCloseRef.current = false; });
+            break;
+          }
         }
       });
       session.on("agent_tool_start", (_context, _agent, toolCall) => {
@@ -582,4 +608,9 @@ async function addImageToSession(session: RealtimeSession, imageUrl: string) {
   } catch {
     // Slide text remains available if the image cannot be loaded.
   }
+}
+
+function shouldResumeScriptedLecture(transcript: string, handoffOffered: boolean) {
+  if (/\b(next slide|next page|next topic|continue (the )?lecture|resume (the )?lecture|move to the next)\b/.test(transcript)) return true;
+  return handoffOffered && /^(yes|yeah|yep|okay|ok|sure|do it|let's|lets|go ahead)\b/.test(transcript.trim());
 }

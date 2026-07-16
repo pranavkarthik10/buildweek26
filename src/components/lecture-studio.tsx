@@ -110,7 +110,7 @@ export function LectureStudio({
   const boardSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const boardSaveAbortRef = useRef<AbortController | null>(null);
   const [whiteboardContent, setWhiteboardContent] = useState<WhiteboardContent>({
-    mode: "text",
+    mode: "canvas",
     title: "Whiteboard",
     tldrawSnapshot: initialBoardSnapshot,
   });
@@ -139,26 +139,24 @@ export function LectureStudio({
         if (!response.ok || cancelled) return;
         const artifact = (await response.json()) as {
           status?: WhiteboardContent["explainerStatus"];
+          id?: string;
+          engine?: string;
+          kind?: string;
           artifactUrl?: string | null;
-          previewUrl?: string | null;
+          specUrl?: string | null;
           url?: string | null;
           error?: string | null;
         };
         if (cancelled || !artifact.status) return;
-        setWhiteboardContent((current) => current.mode === "explainer"
-          ? {
-              ...current,
-              explainerStatus: artifact.status,
-              explainerUrl: artifact.previewUrl ?? artifact.url ?? current.explainerUrl,
-              explainerVideoUrl: artifact.artifactUrl ?? current.explainerVideoUrl,
-              explainerError: artifact.error ?? undefined,
-            }
-          : current);
+        if (artifact.id && artifact.engine) {
+          await canvasRef.current?.whenReady();
+          canvasRef.current?.insertVisualArtifact({ id: artifact.id, engine: artifact.engine, status: artifact.status, artifactUrl: artifact.artifactUrl ?? artifact.url ?? undefined, specUrl: artifact.specUrl ?? artifact.url ?? undefined });
+        }
         setWhiteboardStatus(
           artifact.status === "completed"
             ? "Visual explainer ready"
             : artifact.status === "failed"
-              ? "Video render failed; the interactive preview is still available."
+              ? "Visual rendering failed; the live board is still available."
               : `Rendering visual... ${artifact.status}`,
         );
         if (["completed", "failed"].includes(artifact.status)) setActiveArtifactId(null);
@@ -321,7 +319,7 @@ export function LectureStudio({
 
     setWhiteboardOpen(true);
     setWhiteboardContent({
-      mode: input.mode === "manim" ? "explainer" : input.mode === "strokes" ? "canvas" : input.mode,
+      mode: "canvas",
       title: input.title ?? "Whiteboard",
       tldrawSnapshot: boardSnapshotRef.current,
     });
@@ -360,8 +358,8 @@ export function LectureStudio({
         onStep: (step) => {
           setWhiteboardStatus(step.stepSummary);
         },
-        applyCanvasActions: (actions) => {
-          canvasRef.current?.applyActions(actions);
+        applyCanvasActions: async (actions) => {
+          await canvasRef.current?.applyActions(actions);
         },
       });
 
@@ -522,6 +520,13 @@ export function LectureStudio({
     const resumeIndex = resumeSlideIndexRef.current ?? currentSlideIndex;
     resumeSlideIndexRef.current = null;
     void runScriptedLecture(lectureDeck, resumeIndex);
+  }
+
+  function resumeLectureFromRealtime(options?: { advance?: boolean }) {
+    if (options?.advance && lectureDeck) {
+      resumeSlideIndexRef.current = Math.min(currentSlideIndex + 1, lectureDeck.slides.length - 1);
+    }
+    resumeLecture();
   }
 
   async function runScriptedLecture(
@@ -815,12 +820,21 @@ export function LectureStudio({
     const cacheKey = getSpeechWarmupCacheKey(normalizedText);
     const cached = speechWarmupCacheRef.current.get(cacheKey);
 
-    if (cached === undefined) {
+    if (cached === undefined || cached === null) {
       return getWarmedSpeechPromise(normalizedText);
     }
 
     speechWarmupCacheRef.current.delete(cacheKey);
-    return cached;
+    // A warmed Response may have been claimed by an older lecture run during
+    // a rapid restart/navigation. Never hand the same body to two readers.
+    return cached.then(async (result) => {
+      if (!result.response?.body) return result;
+      try {
+        return { ...result, response: result.response.clone() };
+      } catch {
+        return requestSpeechStream(normalizedText);
+      }
+    });
   }
 
   async function requestSpeechStream(text: string, cacheable = true): Promise<SpeechStreamResult> {
@@ -859,6 +873,9 @@ export function LectureStudio({
     shouldContinue: () => boolean,
     onPlaybackStart?: () => void,
   ): Promise<SpeechPlaybackResult> {
+    if (body.locked) {
+      return { ok: false, error: "The warmed speech stream was already consumed.", retryAfterMs: 1 };
+    }
     const reader = body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -1128,15 +1145,12 @@ export function LectureStudio({
         continue;
       }
       if (effect.type === "create_micro_explainer") {
-        handleRealtimeArtifact({ id: effect.jobId, status: effect.status, url: effect.url });
+        handleRealtimeArtifact({ id: effect.jobId, status: effect.status, url: effect.url, specUrl: effect.specUrl, engine: effect.engine, kind: effect.kind });
         continue;
       }
       if (effect.type === "mutate_whiteboard") {
-        setWhiteboardContent((current) => current.mode === "text"
-          ? { mode: "canvas", title: "Text tutor board", tldrawSnapshot: boardSnapshotRef.current }
-          : current);
         setWhiteboardOpen(true);
-        setTeachingFocus("whiteboard");
+        setTeachingFocus(effect.presentation === "whiteboard" ? "whiteboard" : "split");
         setWhiteboardStatus(effect.explanation ?? "Applying tutor correction...");
         const applied = await applyBoardTransactionWhenReady(effect.transaction);
         if (!applied) setWhiteboardStatus("The board changed while the tutor was working. Nothing was erased.");
@@ -1145,14 +1159,15 @@ export function LectureStudio({
   }
 
   async function applyBoardTransactionWhenReady(transaction: import("@/lib/whiteboard-transaction").BoardTransaction) {
-    for (let attempt = 0; attempt < 8; attempt += 1) {
+    await canvasRef.current?.whenReady();
+    for (let attempt = 0; attempt < 2; attempt += 1) {
       const result = canvasRef.current?.applyTransaction(transaction);
       if (result?.ok) return true;
       if (result?.code === "conflict") {
         setWhiteboardStatus("The board changed while the tutor was working. Nothing was erased.");
         return false;
       }
-      await sleep(40);
+      await sleep(80);
     }
     return false;
   }
@@ -1185,11 +1200,7 @@ export function LectureStudio({
       return;
     }
 
-    setWhiteboardContent({
-      mode: "canvas",
-      title: "Realtime board",
-      tldrawSnapshot: boardSnapshotRef.current,
-    });
+    setWhiteboardContent((current) => ({ ...current, mode: "canvas", title: current.title ?? "Realtime board", tldrawSnapshot: boardSnapshotRef.current }));
     setWhiteboardOpen(true);
   }
 
@@ -1205,16 +1216,15 @@ export function LectureStudio({
     });
   }
 
-  function handleRealtimeArtifact(artifact: { id: string; status: string; url?: string }) {
+  function handleRealtimeArtifact(artifact: { id: string; status: string; url?: string; specUrl?: string; engine?: string; kind?: string }) {
     setTeachingFocus("whiteboard");
-    setWhiteboardContent({
-      mode: "explainer",
-      title: "Visual explainer",
-      explainerUrl: artifact.url,
-      explainerStatus: artifact.status as WhiteboardContent["explainerStatus"],
-    });
+    setWhiteboardContent((current) => ({ ...current, mode: "canvas", title: "Visual explainer", tldrawSnapshot: boardSnapshotRef.current }));
     setWhiteboardOpen(true);
-    setWhiteboardStatus(artifact.status === "preview" ? "Preview ready" : "Rendering visual…");
+    setWhiteboardStatus(artifact.status === "completed" ? "Visual ready" : "Rendering visual…");
+    void (async () => {
+      await canvasRef.current?.whenReady();
+      canvasRef.current?.insertVisualArtifact({ id: artifact.id, engine: artifact.engine ?? "diagram", status: artifact.status, artifactUrl: artifact.url, specUrl: artifact.specUrl ?? `/api/render-jobs/${artifact.id}/spec` });
+    })();
     setActiveArtifactId(["completed", "failed"].includes(artifact.status) ? null : artifact.id);
   }
 
@@ -1426,9 +1436,17 @@ export function LectureStudio({
       realtimeState={realtimeState}
       onRealtimeStateChange={setRealtimeState}
       onRealtimeFallback={resumeLecture}
+      onRealtimeResumeLecture={resumeLectureFromRealtime}
       onRealtimeFocus={handleRealtimeFocus}
       onRealtimePoint={handleRealtimePoint}
-      onRealtimeJumpToSlide={(slideIndex) => jumpToSlide(slideIndex, { resumeLecture: false })}
+      onRealtimeJumpToSlide={(slideIndex) => {
+        const from = lectureDeck.slides[currentSlideIndex];
+        const destination = lectureDeck.slides[slideIndex];
+        if (from && destination && Math.abs(slideIndex - currentSlideIndex) > 1) {
+          setLiveStatus(`Connected page ${destination.slideNumber} to page ${from.slideNumber}; skipped pages remain available`);
+        }
+        jumpToSlide(slideIndex, { resumeLecture: false });
+      }}
       onRealtimeArtifact={handleRealtimeArtifact}
       onWhiteboardClose={() => {
         whiteboardAbortRef.current?.abort();

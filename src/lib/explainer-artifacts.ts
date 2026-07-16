@@ -1,14 +1,18 @@
 import { prisma } from "@/lib/db";
 import { buildExplainerSpec, jobKeyForSpec } from "@/lib/explainer";
+import { planVisualSpec } from "@/lib/visual-planner";
 import type { ExplainerRequestInput } from "@/lib/explainer-types";
 import { enqueueRenderJob } from "@/lib/render-queue";
 import { renderExplainerArtifactById } from "@/lib/render-worker";
 import { isObjectStorageConfigured, objectExists, objectUrlForKey } from "@/lib/object-storage";
 
 export async function requestExplainerArtifact(input: ExplainerRequestInput) {
-  const spec = buildExplainerSpec(input);
+  const deterministicSpec = buildExplainerSpec(input);
+  const deterministicKey = jobKeyForSpec(deterministicSpec);
+  const deterministicArtifact = await prisma.artifact.findUnique({ where: { jobKey: deterministicKey } });
+  if (deterministicArtifact) return { artifact: deterministicArtifact, spec: deterministicSpec, created: false };
+  const spec = await planVisualSpec(input);
   const jobKey = jobKeyForSpec(spec);
-  const previewUrl = `/api/render-jobs/${jobKey}/preview`;
   let artifact = await prisma.artifact.findUnique({ where: { jobKey } });
   let created = false;
 
@@ -18,10 +22,11 @@ export async function requestExplainerArtifact(input: ExplainerRequestInput) {
         data: {
           sessionId: input.sessionId,
           jobKey,
-          status: "preview",
+          status: spec.kind === "video" ? "preview" : "completed",
+          kind: spec.kind,
           engine: spec.engine,
           spec: JSON.stringify(spec),
-          previewUrl,
+          specVersion: spec.version,
         },
       });
       created = true;
@@ -32,7 +37,7 @@ export async function requestExplainerArtifact(input: ExplainerRequestInput) {
     }
   }
 
-  if (created || artifact.status === "preview" || artifact.status === "failed") {
+  if (spec.kind === "video" && (created || artifact.status === "preview" || artifact.status === "failed")) {
     const artifactKey = `artifacts/${jobKey}.mp4`;
     const reusableUrl = isObjectStorageConfigured()
       && await objectExists(artifactKey)

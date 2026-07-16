@@ -334,7 +334,11 @@ export async function* streamLectureSpeech(input: {
   let totalBytes = 0;
 
   for await (const chunk of response) {
-    const audio = chunk.data;
+    // Avoid the SDK's convenience `chunk.data` getter here: it concatenates
+    // every data part and logs a warning when Gemini also emits text metadata.
+    // TTS only needs the inline audio part.
+    const inlineAudio = chunk.candidates?.[0]?.content?.parts?.find((part) => part.inlineData)?.inlineData;
+    const audio = inlineAudio?.data;
 
     if (!audio) {
       continue;
@@ -345,9 +349,7 @@ export async function* streamLectureSpeech(input: {
     yield {
       audio,
       sampleRate: 24000,
-      mimeType:
-        chunk.candidates?.[0]?.content?.parts?.find((part) => part.inlineData)
-          ?.inlineData?.mimeType ?? "audio/pcm;rate=24000",
+      mimeType: inlineAudio?.mimeType ?? "audio/pcm;rate=24000",
       durationMs: Math.max(
         120,
         Math.round((Buffer.byteLength(audio, "base64") / 2 / 24000) * 1000),

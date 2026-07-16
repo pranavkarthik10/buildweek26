@@ -4,6 +4,7 @@ import {
   getTutorToolDeclarations,
   hasExplicitVisualIntent,
   searchCourseMaterial,
+  resolveSlideIndex,
   tutorToolNames,
   validateTutorToolArgs,
 } from "@/lib/tutor-tools";
@@ -59,5 +60,14 @@ describe("tutor tool contracts", () => {
       ],
     }, "reorder point", 2);
     expect(results[0]?.index).toBe(1);
+  });
+
+  it("maps learner-facing page numbers to zero-based tool indices", () => {
+    const deck = {
+      deckId: "deck", deckTitle: "Deck", courseName: "Course", summary: "", studyStrategy: "", totalSlides: 4,
+      slides: [1, 2, 3, 4].map((slideNumber) => ({ id: String(slideNumber), slideNumber, imageUrl: "", title: `Page ${slideNumber}`, summary: "", bullets: [], coachNote: "", examRelevance: "medium" as const, cues: [] })),
+    };
+    expect(resolveSlideIndex(deck, 3, "go to page 3")).toBe(2);
+    expect(resolveSlideIndex(deck, 2, "go to page 3")).toBe(2);
   });
 });

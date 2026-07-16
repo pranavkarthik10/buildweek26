@@ -30,6 +30,9 @@ describe("realtime tutor context", () => {
     });
     expect(instructions).toContain("Current slide index: 1");
     expect(instructions).toContain("Reorder point");
+    expect(instructions).toContain("Page 3 means slideIndex 2");
+    expect(instructions).toContain("skipped pages remain available");
+    expect(instructions).toContain("Reorder point");
     expect(instructions).not.toContain("Current slide 1: Counts");
   });
 

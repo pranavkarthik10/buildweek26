@@ -1,17 +1,23 @@
 import { describe, expect, it } from "vitest";
 
-import { parseHyperFramesJsonOutput } from "@/lib/render-worker";
+import { compileManimScene, expressionToPython } from "@/lib/manim-compiler";
 
-describe("HyperFrames process output", () => {
-  it("extracts the final check payload from noisy CLI output", () => {
-    expect(parseHyperFramesJsonOutput([
-      "[browser] {\"phase\":\"boot\"}",
-      "notice: validating composition",
-      "{\"ok\":true,\"checks\":[{\"name\":\"layout\",\"ok\":true}]}",
-    ].join("\n"))).toMatchObject({ ok: true });
+describe("Manim scene compiler", () => {
+  it("compiles only application-owned scene primitives", () => {
+    const source = compileManimScene({
+      engine: "manim",
+      objects: [
+        { type: "axes", id: "axes", xRange: [-2, 2], yRange: [-1, 4] },
+        { type: "graph", id: "curve", expression: { type: "power", base: { type: "variable", name: "x" }, exponent: 2 }, domain: [-2, 2] },
+      ],
+      actions: [{ type: "create", targetId: "curve", durationSec: 1 }],
+    });
+    expect(source).toContain("class StudydeckScene");
+    expect(source).toContain("objects[\"curve\"]");
+    expect(source).not.toContain("eval(");
   });
 
-  it("returns null when the renderer emits no JSON", () => {
-    expect(parseHyperFramesJsonOutput("renderer terminated unexpectedly")).toBeNull();
+  it("translates the safe expression AST without executable input", () => {
+    expect(expressionToPython({ type: "add", left: { type: "variable", name: "x" }, right: { type: "constant", value: 2 } })).toBe("(x + 2)");
   });
 });

@@ -27,7 +27,7 @@ export type WhiteboardSessionInput = {
   onStep?: (step: WhiteboardStepResult, index: number) => void;
   applyCanvasActions?: (
     actions: NonNullable<WhiteboardStepResult["actions"]>,
-  ) => void;
+  ) => void | Promise<void>;
 };
 
 export async function runWhiteboardSession(
@@ -99,7 +99,7 @@ export async function runWhiteboardSession(
     input.onStep?.(step, stepIndex);
 
     if (effectiveMode === "canvas" && step.actions?.length) {
-      input.applyCanvasActions?.(step.actions);
+      await input.applyCanvasActions?.(step.actions);
     }
 
     if (step.content) {
@@ -150,7 +150,7 @@ async function createExplainer(input: WhiteboardSessionInput): Promise<Whiteboar
     jobId?: string;
     status?: WhiteboardContent["explainerStatus"];
     url?: string;
-    previewUrl?: string;
+    specUrl?: string;
     artifactUrl?: string;
     error?: string;
   };
@@ -158,11 +158,11 @@ async function createExplainer(input: WhiteboardSessionInput): Promise<Whiteboar
     throw new Error(payload.error ?? "Could not start the visual explainer.");
   }
   const content: WhiteboardContent = {
-    mode: "explainer",
+    mode: "canvas",
     title: input.title ?? "Visual explainer",
     explainerId: payload.jobId,
     explainerStatus: payload.status ?? "queued",
-    explainerUrl: payload.previewUrl ?? payload.url,
+    explainerUrl: payload.specUrl ?? payload.url,
     explainerVideoUrl: payload.artifactUrl,
   };
   input.onContent?.(content);
