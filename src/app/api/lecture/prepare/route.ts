@@ -12,7 +12,7 @@ import {
   readCachedDeck,
   writeCachedDeck,
 } from "@/lib/lecture-cache";
-import { renderPdfSlides } from "@/lib/pdf-slides";
+import { MAX_PDF_BYTES, MAX_PDF_PAGES, renderPdfSlides } from "@/lib/pdf-slides";
 
 export const runtime = "nodejs";
 
@@ -34,7 +34,17 @@ export async function POST(request: Request) {
       );
     }
 
+    if (file.size > MAX_PDF_BYTES) {
+      return NextResponse.json(
+        { error: `PDF uploads are limited to ${MAX_PDF_BYTES / 1_000_000} MB.` },
+        { status: 413 },
+      );
+    }
+
     const { hash, buffer } = await hashFile(file);
+    if (buffer.subarray(0, 5).toString("ascii") !== "%PDF-") {
+      return NextResponse.json({ error: "The uploaded file is not a valid PDF." }, { status: 400 });
+    }
     const cachedDeck = await readCachedDeck(hash);
 
     if (cachedDeck) {
@@ -81,7 +91,7 @@ export async function POST(request: Request) {
       model: getGeneralModel(),
       fileName: file.name,
       durationMs: Date.now() - startedAt,
-      slides: lectureDeck.slides.length,
+      slides: Math.min(lectureDeck.slides.length, MAX_PDF_PAGES),
       cacheHit: false,
       ok: true,
     };

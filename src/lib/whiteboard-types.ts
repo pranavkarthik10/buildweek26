@@ -1,6 +1,7 @@
 import type {
   AgentWhiteboardMode,
   LectureSlide,
+  TutorSource,
   WhiteboardContent,
   WhiteboardMode,
 } from "@/lib/aiprof-types";
@@ -57,6 +58,10 @@ export type WhiteboardStepRequest = {
   >;
   deckTitle?: string;
   courseName?: string;
+  summary?: string;
+  studyStrategy?: string;
+  teachingFormat?: string;
+  customInstructions?: string;
   question?: string;
   stepIndex: number;
   maxSteps?: number;
@@ -77,6 +82,7 @@ export type WhiteboardStepResult = {
 export type TutorQuestionResult = {
   spokenAnswer: string;
   focus: TeachingFocus;
+  sources?: TutorSource[];
   whiteboard?: {
     enabled: boolean;
     mode: AgentWhiteboardMode;

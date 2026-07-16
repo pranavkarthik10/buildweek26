@@ -1,7 +1,10 @@
 import { NextResponse } from "next/server";
 
 import type { LectureSlide, TeachingFormat } from "@/lib/aiprof-types";
-import { generateLectureSegment, getErrorMessage } from "@/lib/gemini";
+import { generateLectureSegment, getErrorMessage, getGeneralModel } from "@/lib/gemini";
+import { getOrCreateModelOutput, modelOutputCacheKey } from "@/lib/model-output-cache";
+
+const LECTURE_SEGMENT_CACHE_NAMESPACE = "lecture-segment-v2";
 
 export async function POST(request: Request) {
   try {
@@ -23,7 +26,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const segment = await generateLectureSegment({
+    const segmentInput = {
       deckTitle: body.deckTitle ?? "Uploaded lecture deck",
       courseName: body.courseName ?? "Course",
       summary: body.summary ?? "",
@@ -32,14 +35,29 @@ export async function POST(request: Request) {
       customInstructions: body.customInstructions ?? "",
       currentSlide: body.currentSlide,
       nextSlide: body.nextSlide,
+    };
+    const cacheKey = modelOutputCacheKey(LECTURE_SEGMENT_CACHE_NAMESPACE, {
+      model: getGeneralModel(),
+      input: segmentInput,
     });
+    const cached = await getOrCreateModelOutput({
+      namespace: LECTURE_SEGMENT_CACHE_NAMESPACE,
+      key: cacheKey,
+      validate: isLectureSegment,
+      create: () => generateLectureSegment(segmentInput),
+    });
+    const segment = cached.value;
 
-    console.log("[aiprof] segment generated", {
+    console.log("[studydeck] segment ready", {
       slide: segment.slideNumber,
       beats: segment.beats.length,
+      cacheHit: cached.cacheHit,
     });
 
-    return NextResponse.json({ segment });
+    return NextResponse.json({
+      segment,
+      cache: { hit: cached.cacheHit, key: cacheKey.slice(0, 12) },
+    });
   } catch (error) {
     console.error("[aiprof] segment error", error);
     return NextResponse.json(
@@ -47,4 +65,13 @@ export async function POST(request: Request) {
       { status: 500 },
     );
   }
+}
+
+function isLectureSegment(value: unknown): value is Awaited<ReturnType<typeof generateLectureSegment>> {
+  if (!value || typeof value !== "object") return false;
+  const segment = value as { slideNumber?: unknown; beats?: unknown };
+  return typeof segment.slideNumber === "number"
+    && Number.isSafeInteger(segment.slideNumber)
+    && Array.isArray(segment.beats)
+    && segment.beats.every((beat) => Boolean(beat) && typeof beat === "object");
 }

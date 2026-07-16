@@ -4,6 +4,7 @@ import type {
   WhiteboardStepRecord,
   WhiteboardStepResult,
 } from "@/lib/whiteboard-types";
+import { hasExplicitVisualIntent } from "@/lib/tutor-tools";
 
 export type WhiteboardSessionInput = {
   mode: WhiteboardMode;
@@ -12,7 +13,12 @@ export type WhiteboardSessionInput = {
   slide: LectureSlide;
   deckTitle?: string;
   courseName?: string;
+  summary?: string;
+  studyStrategy?: string;
+  teachingFormat?: string;
+  customInstructions?: string;
   question?: string;
+  sessionId?: string;
   maxSteps?: number;
   signal?: AbortSignal;
   getSnapshot?: () => string | undefined;
@@ -27,11 +33,18 @@ export type WhiteboardSessionInput = {
 export async function runWhiteboardSession(
   input: WhiteboardSessionInput,
 ): Promise<WhiteboardContent> {
+  // Legacy Manim requests use the validated explainer pipeline. Legacy
+  // stroke requests migrate to tldraw canvas actions instead of producing an
+  // empty payload.
+  if (input.mode === "manim" && hasExplicitVisualIntent(input.question ?? "")) {
+    return createExplainer(input);
+  }
+  const effectiveMode = input.mode === "strokes" || input.mode === "manim" ? "canvas" : input.mode;
   const maxSteps = input.maxSteps ?? 12;
   const priorSteps: WhiteboardStepRecord[] = [];
 
   let content: WhiteboardContent = {
-    mode: input.mode,
+    mode: effectiveMode,
     title: input.title ?? "Whiteboard",
   };
 
@@ -47,7 +60,7 @@ export async function runWhiteboardSession(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        mode: input.mode,
+        mode: effectiveMode,
         goal: input.goal,
         slide: {
           slideNumber: input.slide.slideNumber,
@@ -58,6 +71,10 @@ export async function runWhiteboardSession(
         },
         deckTitle: input.deckTitle,
         courseName: input.courseName,
+        summary: input.summary,
+        studyStrategy: input.studyStrategy,
+        teachingFormat: input.teachingFormat,
+        customInstructions: input.customInstructions,
         question: input.question,
         stepIndex,
         maxSteps,
@@ -81,12 +98,12 @@ export async function runWhiteboardSession(
     input.onFocus?.(step.focus);
     input.onStep?.(step, stepIndex);
 
-    if (input.mode === "canvas" && step.actions?.length) {
+    if (effectiveMode === "canvas" && step.actions?.length) {
       input.applyCanvasActions?.(step.actions);
     }
 
     if (step.content) {
-      content = { ...content, ...step.content, mode: input.mode };
+      content = { ...content, ...step.content, mode: effectiveMode };
       input.onContent?.(content);
     }
 
@@ -103,6 +120,53 @@ export async function runWhiteboardSession(
     await sleep(420);
   }
 
+  return content;
+}
+
+async function createExplainer(input: WhiteboardSessionInput): Promise<WhiteboardContent> {
+  const response = await fetch("/api/render-jobs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sessionId: input.sessionId,
+      learnerRequest: input.question,
+      question: input.question ?? input.goal,
+      concept: input.title ?? "the lesson concept",
+      goal: input.goal,
+      durationSec: 30,
+      visualStyle: "math",
+      deckTitle: input.deckTitle,
+      courseName: input.courseName,
+      slide: {
+        slideNumber: input.slide.slideNumber,
+        title: input.slide.title,
+        summary: input.slide.summary,
+        bullets: input.slide.bullets,
+      },
+    }),
+    signal: input.signal,
+  });
+  const payload = (await response.json().catch(() => ({}))) as {
+    jobId?: string;
+    status?: WhiteboardContent["explainerStatus"];
+    url?: string;
+    previewUrl?: string;
+    artifactUrl?: string;
+    error?: string;
+  };
+  if (!response.ok || !payload.jobId) {
+    throw new Error(payload.error ?? "Could not start the visual explainer.");
+  }
+  const content: WhiteboardContent = {
+    mode: "explainer",
+    title: input.title ?? "Visual explainer",
+    explainerId: payload.jobId,
+    explainerStatus: payload.status ?? "queued",
+    explainerUrl: payload.previewUrl ?? payload.url,
+    explainerVideoUrl: payload.artifactUrl,
+  };
+  input.onContent?.(content);
+  input.onFocus?.("whiteboard");
   return content;
 }
 

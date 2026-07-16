@@ -9,18 +9,23 @@ import type {
   LectureSegment,
   LectureSlide,
   TeachingFormat,
+  TutorSource,
   WhiteboardContent,
   WhiteboardMode,
 } from "@/lib/aiprof-types";
 import { runWhiteboardSession } from "@/lib/run-whiteboard-session";
-import type { TeachingFocus } from "@/lib/whiteboard-types";
+import type {
+  TeachingFocus,
+} from "@/lib/whiteboard-types";
+import type { TutorBoardContext, TutorEffect } from "@/lib/tutor-tools";
 
 import { LectureWorkspace } from "@/components/lecture-workspace";
+import type { RealtimeTutorState } from "@/components/realtime-tutor";
 import type { WhiteboardTldrawHandle } from "@/components/whiteboard-tldraw";
 import { PcmAudioPlayer } from "@/lib/live-audio";
 
 const DEFAULT_SPEECH_SPEED = 1.03;
-const SEGMENT_PREFETCH_AHEAD = 3;
+const SEGMENT_PREFETCH_AHEAD = 2;
 
 type StreamSpeechMessage = {
   type?: "audio" | "done" | "error";
@@ -51,6 +56,8 @@ type LectureStudioProps = {
   initialCueIndex?: number;
   initialTeachingFormat?: TeachingFormat;
   initialCustomInstructions?: string;
+  initialBoardSnapshot?: string;
+  initialBoardVersion?: number;
   autoStart?: boolean;
   sessionId?: string;
   onSlideChange?: (slideIndex: number, cueIndex: number) => void;
@@ -67,6 +74,8 @@ export function LectureStudio({
   initialCueIndex = 0,
   initialTeachingFormat = "lecture",
   initialCustomInstructions = "",
+  initialBoardSnapshot,
+  initialBoardVersion = 0,
   autoStart = false,
   sessionId,
   onSlideChange,
@@ -78,9 +87,13 @@ export function LectureStudio({
   const [currentCueIndex, setCurrentCueIndex] = useState(initialCueIndex);
   const [isAnswering, setIsAnswering] = useState(false);
   const [answer, setAnswer] = useState("");
+  const [checkpointQuestion, setCheckpointQuestion] = useState("");
+  const [answerSources, setAnswerSources] = useState<TutorSource[]>([]);
   const [questionError, setQuestionError] = useState("");
   const [liveStatus, setLiveStatus] = useState("idle");
   const [liveError, setLiveError] = useState("");
+  const [realtimeConnectRequest, setRealtimeConnectRequest] = useState(0);
+  const [realtimeState, setRealtimeState] = useState<RealtimeTutorState>("idle");
   const [isAudioPaused, setIsAudioPaused] = useState(false);
   const [speechSpeed, setSpeechSpeed] = useState(DEFAULT_SPEECH_SPEED);
   const [teachingFormat, setTeachingFormat] = useState<TeachingFormat>(
@@ -91,9 +104,15 @@ export function LectureStudio({
   );
   const [isSpeakingAnswer, setIsSpeakingAnswer] = useState(false);
   const [whiteboardOpen, setWhiteboardOpen] = useState(false);
+  const [activeArtifactId, setActiveArtifactId] = useState<string | null>(null);
+  const boardSnapshotRef = useRef(initialBoardSnapshot);
+  const boardSemanticRef = useRef<TutorBoardContext>({ version: initialBoardVersion, shapes: [] });
+  const boardSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const boardSaveAbortRef = useRef<AbortController | null>(null);
   const [whiteboardContent, setWhiteboardContent] = useState<WhiteboardContent>({
     mode: "text",
     title: "Whiteboard",
+    tldrawSnapshot: initialBoardSnapshot,
   });
   const [teachingFocus, setTeachingFocus] = useState<TeachingFocus>("slides");
   const [whiteboardStatus, setWhiteboardStatus] = useState<string | undefined>();
@@ -109,6 +128,52 @@ export function LectureStudio({
     targetBullet: number;
   } | null>(null);
   const audioPlayerRef = useRef<PcmAudioPlayer | null>(null);
+
+  useEffect(() => {
+    if (!activeArtifactId) return;
+    let cancelled = false;
+
+    async function pollArtifact() {
+      try {
+        const response = await fetch(`/api/render-jobs/${activeArtifactId}`, { cache: "no-store" });
+        if (!response.ok || cancelled) return;
+        const artifact = (await response.json()) as {
+          status?: WhiteboardContent["explainerStatus"];
+          artifactUrl?: string | null;
+          previewUrl?: string | null;
+          url?: string | null;
+          error?: string | null;
+        };
+        if (cancelled || !artifact.status) return;
+        setWhiteboardContent((current) => current.mode === "explainer"
+          ? {
+              ...current,
+              explainerStatus: artifact.status,
+              explainerUrl: artifact.previewUrl ?? artifact.url ?? current.explainerUrl,
+              explainerVideoUrl: artifact.artifactUrl ?? current.explainerVideoUrl,
+              explainerError: artifact.error ?? undefined,
+            }
+          : current);
+        setWhiteboardStatus(
+          artifact.status === "completed"
+            ? "Visual explainer ready"
+            : artifact.status === "failed"
+              ? "Video render failed; the interactive preview is still available."
+              : `Rendering visual... ${artifact.status}`,
+        );
+        if (["completed", "failed"].includes(artifact.status)) setActiveArtifactId(null);
+      } catch {
+        // Keep the inline preview available if the status endpoint is offline.
+      }
+    }
+
+    void pollArtifact();
+    const timer = window.setInterval(() => void pollArtifact(), 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [activeArtifactId]);
   const lectureRunRef = useRef(0);
   const answerRunRef = useRef(0);
   const speechSpeedRef = useRef(DEFAULT_SPEECH_SPEED);
@@ -118,9 +183,6 @@ export function LectureStudio({
   const startLectureRef = useRef<
     (options?: StartLectureOptions) => Promise<void>
   >(async () => undefined);
-  const prewarmLectureWindowRef = useRef<
-    (deck: LectureDeck, fromSlideIndex: number) => void
-  >(() => undefined);
   const segmentCacheRef = useRef(new Map<string, Promise<LectureSegment>>());
   const speechWarmupCacheRef = useRef(new Map<string, Promise<SpeechStreamResult> | null>());
 
@@ -136,12 +198,17 @@ export function LectureStudio({
     if (!autoStart || autoStartAttemptedRef.current) return;
 
     autoStartAttemptedRef.current = true;
-    void startLectureRef.current({ automatic: true });
+    // Browsers require a user gesture before AudioContext.resume(). Attempting
+    // to unlock here can leave the entire session on a permanent loading
+    // screen because the promise is allowed to remain pending.
+    if (navigator.userActivation?.isActive) {
+      void startLectureRef.current({ automatic: true });
+      return;
+    }
+    setIsAutoStarting(false);
+    setLiveStatus("idle");
+    setLiveError("Resume the lecture to enable audio, or start the realtime tutor after entering the studio.");
   }, [autoStart]);
-
-  useEffect(() => {
-    prewarmLectureWindowRef.current(lectureDeck, initialSlideIndex);
-  }, [lectureDeck, initialSlideIndex]);
 
   async function startLecture(options?: StartLectureOptions) {
     if (!lectureDeck) return;
@@ -151,16 +218,24 @@ export function LectureStudio({
       setLiveStatus("starting");
       audioPlayerRef.current ??= new PcmAudioPlayer();
       audioPlayerRef.current.setPlaybackRate(speechSpeedRef.current);
-      await audioPlayerRef.current.unlock();
+      const audioReady = await settleWithin(audioPlayerRef.current.unlock(), 3_000);
       setIsAutoStarting(false);
       setIsLive(true);
       setIsAudioPaused(false);
       audioPausedRef.current = false;
       setIsAnswering(false);
       setAnswer("");
-      setLiveError("");
-      prewarmLectureWindow(lectureDeck, currentSlideIndex);
-      void runScriptedLecture(lectureDeck, currentSlideIndex);
+      setCheckpointQuestion("");
+      setAnswerSources([]);
+      setLiveError(audioReady
+        ? ""
+        : "Scripted audio is blocked in this browser. Text questions and the enhanced realtime tutor are still available.");
+      if (audioReady) {
+        prewarmLectureWindow(lectureDeck, currentSlideIndex);
+        void runScriptedLecture(lectureDeck, currentSlideIndex);
+      } else {
+        setLiveStatus("paused");
+      }
     } catch (error) {
       setIsAutoStarting(false);
       setLiveStatus("idle");
@@ -176,7 +251,7 @@ export function LectureStudio({
 
   startLectureRef.current = startLecture;
 
-  function jumpToSlide(index: number) {
+  function jumpToSlide(index: number, options?: { resumeLecture?: boolean }) {
     if (!lectureDeck) return;
 
     stopLectureRun();
@@ -184,7 +259,7 @@ export function LectureStudio({
     setCurrentCueIndex(0);
     setLiveCue(null);
 
-    if (isLive && !isAnswering) {
+    if (options?.resumeLecture !== false && isLive && !isAnswering) {
       void runScriptedLecture(lectureDeck, index);
     }
   }
@@ -246,20 +321,26 @@ export function LectureStudio({
 
     setWhiteboardOpen(true);
     setWhiteboardContent({
-      mode: input.mode,
+      mode: input.mode === "manim" ? "explainer" : input.mode === "strokes" ? "canvas" : input.mode,
       title: input.title ?? "Whiteboard",
+      tldrawSnapshot: boardSnapshotRef.current,
     });
     setWhiteboardStatus("Working on the board…");
 
     try {
-      await runWhiteboardSession({
+      const completedContent = await runWhiteboardSession({
         mode: input.mode,
         goal: input.goal,
         title: input.title,
         slide: input.slide,
         deckTitle: lectureDeck?.deckTitle,
         courseName: lectureDeck?.courseName,
+        summary: lectureDeck?.summary,
+        studyStrategy: lectureDeck?.studyStrategy,
+        teachingFormat,
+        customInstructions,
         question: input.question,
+        sessionId,
         signal: controller.signal,
         getSnapshot: () => canvasRef.current?.getSnapshot(),
         onFocus: (focus) => {
@@ -269,7 +350,11 @@ export function LectureStudio({
           }
         },
         onContent: (content) => {
-          setWhiteboardContent(content);
+          setWhiteboardContent({
+            ...content,
+            tldrawSnapshot: content.tldrawSnapshot ?? boardSnapshotRef.current,
+          });
+          if (content.explainerId) setActiveArtifactId(content.explainerId);
           setWhiteboardOpen(true);
         },
         onStep: (step) => {
@@ -280,8 +365,17 @@ export function LectureStudio({
         },
       });
 
-      setWhiteboardStatus(undefined);
-      setTeachingFocus("slides");
+      if (completedContent.explainerId) {
+        setActiveArtifactId(completedContent.explainerId);
+        setWhiteboardStatus(completedContent.explainerStatus === "completed" ? "Visual explainer ready" : "Rendering visual explainer…");
+        setTeachingFocus("whiteboard");
+      } else {
+        // Keep the finished board visible and reopenable after the agent
+        // completes its work instead of letting it flash and disappear.
+        setWhiteboardStatus("Board ready - reopen anytime");
+        setWhiteboardOpen(true);
+        setTeachingFocus("whiteboard");
+      }
     } catch (error) {
       if (!controller.signal.aborted) {
         console.error("[studydeck] whiteboard session error", error);
@@ -289,21 +383,66 @@ export function LectureStudio({
     }
   }
 
-  async function handleAskQuestion(question: string) {
+  function handleWhiteboardSnapshotChange(snapshot: string) {
+    boardSnapshotRef.current = snapshot;
+    if (canvasRef.current) {
+      boardSemanticRef.current = {
+        version: canvasRef.current.getVersion(),
+        shapes: canvasRef.current.getSemanticShapes().slice(0, 120),
+        diff: canvasRef.current.getSemanticDiff(),
+      };
+    }
+    if (!sessionId) return;
+
+    if (boardSaveTimeoutRef.current) {
+      clearTimeout(boardSaveTimeoutRef.current);
+    }
+
+    boardSaveTimeoutRef.current = setTimeout(() => {
+      boardSaveAbortRef.current?.abort();
+      const controller = new AbortController();
+      boardSaveAbortRef.current = controller;
+
+      void (async () => {
+        const response = await fetch(`/api/sessions/${sessionId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            boardSnapshot: snapshot,
+            boardVersion: canvasRef.current?.getVersion() ?? initialBoardVersion,
+          }),
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          const payload = (await response.json().catch(() => ({}))) as { error?: string };
+          throw new Error(payload.error ?? `Whiteboard save failed (${response.status}).`);
+        }
+      })().catch((error) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        console.error("[studydeck] failed to persist whiteboard", error);
+        setWhiteboardStatus("Whiteboard changes are local; saving will retry after your next edit.");
+      });
+    }, 450);
+  }
+
+  async function handleAskQuestion(question: string, options?: { includeBoardImage?: boolean }) {
     if (!lectureDeck || !activeSlide) return;
 
     stopLectureRun();
     whiteboardAbortRef.current?.abort();
     setIsAnswering(true);
-    setLiveStatus("paused");
+    setLiveStatus(checkpointQuestion ? "checkpoint" : "paused");
     setQuestionError("");
     setAnswer("");
+    setAnswerSources([]);
 
     try {
+      const boardContext = await buildQuestionBoardContext(options?.includeBoardImage === true);
       const response = await fetch("/api/lecture/question", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          sessionId,
           deckTitle: lectureDeck.deckTitle,
           courseName: lectureDeck.courseName,
           summary: lectureDeck.summary,
@@ -312,6 +451,8 @@ export function LectureStudio({
           customInstructions,
           currentSlide: activeSlide,
           question,
+          visualIntent: /animate|animation|visual|diagram|draw|show me|visuali[sz]e|proof|as a video|make it visual/i.test(question),
+          boardContext,
         }),
       });
 
@@ -319,6 +460,7 @@ export function LectureStudio({
         tutor?: {
           spokenAnswer: string;
           focus: TeachingFocus;
+          sources?: TutorSource[];
           whiteboard?: {
             enabled: boolean;
             mode: WhiteboardMode;
@@ -327,6 +469,8 @@ export function LectureStudio({
           };
         };
         answer?: string;
+        effects?: TutorEffect[];
+        toolTrace?: Array<{ name: string; status: string; error?: string }>;
         error?: string;
       };
 
@@ -339,7 +483,9 @@ export function LectureStudio({
         tutor?.spokenAnswer ?? payload.answer ?? "No answer returned.";
 
       setAnswer(spoken);
+      setAnswerSources(tutor?.sources ?? []);
       setTeachingFocus(tutor?.focus ?? "slides");
+      await applyTextTutorEffects(payload.effects ?? []);
 
       if (tutor?.whiteboard?.enabled) {
         setWhiteboardOpen(true);
@@ -356,6 +502,8 @@ export function LectureStudio({
 
       void speakAnswer(spoken);
     } catch (error) {
+      setIsAnswering(false);
+      setLiveStatus(checkpointQuestion ? "checkpoint" : "paused");
       setQuestionError(
         error instanceof Error ? error.message : "Failed to answer question."
       );
@@ -368,6 +516,9 @@ export function LectureStudio({
     setIsAnswering(false);
     setIsLive(true);
     setAnswer("");
+    setCheckpointQuestion("");
+    setAnswerSources([]);
+    setLiveError("");
     const resumeIndex = resumeSlideIndexRef.current ?? currentSlideIndex;
     resumeSlideIndexRef.current = null;
     void runScriptedLecture(lectureDeck, resumeIndex);
@@ -441,7 +592,9 @@ export function LectureStudio({
         resumeSlideIndexRef.current = Math.min(slideIndex + 1, deck.slides.length - 1);
         setLiveStatus("checkpoint");
         setLiveError(segment.checkpointQuestion);
-        setAnswer(segment.checkpointQuestion);
+        setCheckpointQuestion(segment.checkpointQuestion);
+        setAnswer("");
+        setAnswerSources([]);
         setIsAnswering(true);
         return;
       }
@@ -494,8 +647,6 @@ export function LectureStudio({
     }
   }
 
-  prewarmLectureWindowRef.current = prewarmLectureWindow;
-
   async function requestLectureSegment(
     deck: LectureDeck,
     slideIndex: number
@@ -537,6 +688,7 @@ export function LectureStudio({
     shouldContinue = () => true,
     warmedStream: Promise<SpeechStreamResult> | null = null,
     onPlaybackStart?: () => void,
+    cacheable = true,
   ) {
     let lastError = "Failed to generate speech.";
 
@@ -548,7 +700,7 @@ export function LectureStudio({
       const result =
         attempt === 0 && warmedStream
           ? await warmedStream
-          : await requestSpeechStream(text);
+          : await requestSpeechStream(text, cacheable);
 
       if (!result.response?.ok || !result.response.body) {
         lastError = result.error ?? "Failed to stream speech.";
@@ -611,7 +763,9 @@ export function LectureStudio({
     shouldContinue: () => boolean,
     warmedStream: Promise<SpeechStreamResult> | null,
   ) {
-    whiteboardAbortRef.current?.abort();
+    // A board task is allowed to finish while the lecture advances. Explicit
+    // user navigation and session cancellation still abort it via
+    // stopLectureRun; moving to the next slide must not silently discard work.
     whiteboardTriggeredRef.current = false;
     setTeachingFocus("slides");
     setWhiteboardOpen(false);
@@ -669,12 +823,12 @@ export function LectureStudio({
     return cached;
   }
 
-  async function requestSpeechStream(text: string): Promise<SpeechStreamResult> {
+  async function requestSpeechStream(text: string, cacheable = true): Promise<SpeechStreamResult> {
     try {
       const response = await fetch("/api/lecture/tts/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ text, cache: cacheable ? "lecture" : "none" }),
       });
 
       if (response.ok && response.body) {
@@ -936,6 +1090,134 @@ export function LectureStudio({
     audioPausedRef.current = false;
   }
 
+  async function buildQuestionBoardContext(includeImage: boolean) {
+    const canvas = canvasRef.current;
+    if (!canvas) return boardSemanticRef.current;
+    const diff = canvas.getSemanticDiff();
+    const context: {
+      version: number;
+      shapes: ReturnType<WhiteboardTldrawHandle["getSemanticShapes"]>;
+      diff: ReturnType<WhiteboardTldrawHandle["getSemanticDiff"]>;
+      imageDataUrl?: string;
+    } = {
+      version: canvas.getVersion(),
+      shapes: canvas.getSemanticShapes().slice(0, 120),
+      diff,
+    };
+    if (includeImage) {
+      context.imageDataUrl = await canvas.getBoardImage();
+    }
+    return context;
+  }
+
+  async function applyTextTutorEffects(effects: TutorEffect[]) {
+    for (const effect of effects) {
+      if (effect.type === "set_teaching_focus") {
+        handleRealtimeFocus(effect.mode);
+        continue;
+      }
+      if (effect.type === "navigate_slide") {
+        jumpToSlide(effect.slideIndex, { resumeLecture: false });
+        continue;
+      }
+      if (effect.type === "point_to_slide") {
+        if (effect.slideIndex !== currentSlideIndex) {
+          jumpToSlide(effect.slideIndex, { resumeLecture: false });
+        }
+        handleRealtimePoint(effect);
+        continue;
+      }
+      if (effect.type === "create_micro_explainer") {
+        handleRealtimeArtifact({ id: effect.jobId, status: effect.status, url: effect.url });
+        continue;
+      }
+      if (effect.type === "mutate_whiteboard") {
+        setWhiteboardContent((current) => current.mode === "text"
+          ? { mode: "canvas", title: "Text tutor board", tldrawSnapshot: boardSnapshotRef.current }
+          : current);
+        setWhiteboardOpen(true);
+        setTeachingFocus("whiteboard");
+        setWhiteboardStatus(effect.explanation ?? "Applying tutor correction...");
+        const applied = await applyBoardTransactionWhenReady(effect.transaction);
+        if (!applied) setWhiteboardStatus("The board changed while the tutor was working. Nothing was erased.");
+      }
+    }
+  }
+
+  async function applyBoardTransactionWhenReady(transaction: import("@/lib/whiteboard-transaction").BoardTransaction) {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const result = canvasRef.current?.applyTransaction(transaction);
+      if (result?.ok) return true;
+      if (result?.code === "conflict") {
+        setWhiteboardStatus("The board changed while the tutor was working. Nothing was erased.");
+        return false;
+      }
+      await sleep(40);
+    }
+    return false;
+  }
+
+  function activateRealtimeTutor() {
+    stopLectureRun();
+    // Keep the workspace mounted while the WebRTC session negotiates. The
+    // realtime control lives inside this workspace and must survive the
+    // scripted lecture handoff.
+    setIsLive(true);
+    setIsAnswering(false);
+    setAnswer("");
+    setCheckpointQuestion("");
+    setAnswerSources([]);
+    setQuestionError("");
+    setLiveError("");
+    setLiveCue(null);
+    setLiveStatus("realtime");
+  }
+
+  function requestRealtimeTutor() {
+    activateRealtimeTutor();
+    setRealtimeConnectRequest((request) => request + 1);
+  }
+
+  function handleRealtimeFocus(focus: TeachingFocus) {
+    setTeachingFocus(focus);
+    if (focus === "slides") {
+      setWhiteboardOpen(false);
+      return;
+    }
+
+    setWhiteboardContent({
+      mode: "canvas",
+      title: "Realtime board",
+      tldrawSnapshot: boardSnapshotRef.current,
+    });
+    setWhiteboardOpen(true);
+  }
+
+  function handleRealtimePoint(point: { x: number; y: number; label: string }) {
+    setTeachingFocus("slides");
+    setLiveCue({
+      id: `realtime-${Date.now()}`,
+      x: point.x,
+      y: point.y,
+      label: point.label,
+      emphasis: point.label,
+      targetBullet: 0,
+    });
+  }
+
+  function handleRealtimeArtifact(artifact: { id: string; status: string; url?: string }) {
+    setTeachingFocus("whiteboard");
+    setWhiteboardContent({
+      mode: "explainer",
+      title: "Visual explainer",
+      explainerUrl: artifact.url,
+      explainerStatus: artifact.status as WhiteboardContent["explainerStatus"],
+    });
+    setWhiteboardOpen(true);
+    setWhiteboardStatus(artifact.status === "preview" ? "Preview ready" : "Rendering visual…");
+    setActiveArtifactId(["completed", "failed"].includes(artifact.status) ? null : artifact.id);
+  }
+
   function endSession() {
     stopLectureRun();
     setIsLive(false);
@@ -976,7 +1258,13 @@ export function LectureStudio({
     setIsSpeakingAnswer(true);
 
     try {
-      await playLectureSpeech(text, () => answerRunRef.current === runId);
+      await playLectureSpeech(
+        text,
+        () => answerRunRef.current === runId,
+        null,
+        undefined,
+        false,
+      );
 
       if (answerRunRef.current !== runId) {
         return;
@@ -1094,6 +1382,7 @@ export function LectureStudio({
   return (
     <LectureWorkspace
       lectureDeck={lectureDeck}
+      sessionId={sessionId}
       isLive={isLive}
       currentSlideIndex={currentSlideIndex}
       currentCueIndex={currentCueIndex}
@@ -1108,6 +1397,8 @@ export function LectureStudio({
       isAnswering={isAnswering}
       isSpeakingAnswer={isSpeakingAnswer}
       answer={answer}
+      checkpointQuestion={checkpointQuestion}
+      answerSources={answerSources}
       questionError={questionError}
       liveStatus={liveStatus}
       liveError={liveError}
@@ -1122,6 +1413,23 @@ export function LectureStudio({
       whiteboardStatus={whiteboardStatus}
       teachingFocus={teachingFocus}
       canvasRef={canvasRef}
+      initialBoardVersion={initialBoardVersion}
+      onWhiteboardSnapshotChange={handleWhiteboardSnapshotChange}
+      onWhiteboardOpen={() => {
+        setWhiteboardOpen(true);
+        setTeachingFocus("whiteboard");
+        setWhiteboardStatus("Board ready");
+      }}
+      onActivateRealtime={requestRealtimeTutor}
+      onRealtimeSessionActivate={activateRealtimeTutor}
+      realtimeConnectRequest={realtimeConnectRequest}
+      realtimeState={realtimeState}
+      onRealtimeStateChange={setRealtimeState}
+      onRealtimeFallback={resumeLecture}
+      onRealtimeFocus={handleRealtimeFocus}
+      onRealtimePoint={handleRealtimePoint}
+      onRealtimeJumpToSlide={(slideIndex) => jumpToSlide(slideIndex, { resumeLecture: false })}
+      onRealtimeArtifact={handleRealtimeArtifact}
       onWhiteboardClose={() => {
         whiteboardAbortRef.current?.abort();
         setWhiteboardOpen(false);
@@ -1132,6 +1440,20 @@ export function LectureStudio({
       onEndSession={endSession}
     />
   );
+}
+
+async function settleWithin(promise: Promise<unknown>, timeoutMs: number) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise.then(() => true, () => false),
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function sleep(ms: number) {

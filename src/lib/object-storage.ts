@@ -1,4 +1,4 @@
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 
 type R2Config = {
   accountId: string;
@@ -79,4 +79,47 @@ export async function putObject({
       ContentType: contentType,
     }),
   );
+}
+
+export async function getObject(key: string) {
+  const config = getR2Config();
+  if (!config) throw new Error("Cloudflare R2 is not configured.");
+
+  client ??= new S3Client({
+    region: "auto",
+    endpoint: `https://${config.accountId}.r2.cloudflarestorage.com`,
+    credentials: {
+      accessKeyId: config.accessKeyId,
+      secretAccessKey: config.secretAccessKey,
+    },
+  });
+
+  const response = await client.send(
+    new GetObjectCommand({ Bucket: config.bucketName, Key: key }),
+    { abortSignal: AbortSignal.timeout(3_000) },
+  );
+  if (!response.Body) throw new Error("Object has no body.");
+  return Buffer.from(await response.Body.transformToByteArray());
+}
+
+export async function objectExists(key: string) {
+  const config = getR2Config();
+  if (!config) return false;
+  client ??= new S3Client({
+    region: "auto",
+    endpoint: `https://${config.accountId}.r2.cloudflarestorage.com`,
+    credentials: {
+      accessKeyId: config.accessKeyId,
+      secretAccessKey: config.secretAccessKey,
+    },
+  });
+  try {
+    await client.send(
+      new HeadObjectCommand({ Bucket: config.bucketName, Key: key }),
+      { abortSignal: AbortSignal.timeout(3_000) },
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }

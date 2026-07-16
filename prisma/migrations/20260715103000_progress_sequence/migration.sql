@@ -1,0 +1,1 @@
+ALTER TABLE "StudySession" ADD COLUMN "lastProgressSeq" INTEGER NOT NULL DEFAULT 0;

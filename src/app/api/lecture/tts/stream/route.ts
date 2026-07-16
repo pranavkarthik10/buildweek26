@@ -5,6 +5,7 @@ export async function POST(request: Request) {
     const body = (await request.json()) as {
       text?: string;
       voiceName?: string;
+      cache?: "lecture" | "none";
     };
 
     if (!body.text?.trim()) {
@@ -19,19 +20,22 @@ export async function POST(request: Request) {
       async start(controller) {
         try {
           let chunks = 0;
+          let cacheHit = false;
 
           for await (const speech of streamLectureSpeech({
             text: body.text ?? "",
             voiceName: body.voiceName,
+            cache: body.cache !== "none",
           })) {
             chunks += 1;
+            cacheHit ||= speech.cacheHit === true;
             controller.enqueue(
               encoder.encode(`${JSON.stringify({ type: "audio", ...speech })}\n`),
             );
           }
 
           controller.enqueue(
-            encoder.encode(`${JSON.stringify({ type: "done", chunks })}\n`),
+            encoder.encode(`${JSON.stringify({ type: "done", chunks, cacheHit })}\n`),
           );
           controller.close();
         } catch (error) {

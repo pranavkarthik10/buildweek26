@@ -17,7 +17,7 @@ import type {
 import type { TutorQuestionResult } from "@/lib/whiteboard-types";
 import type { RenderedSlide } from "@/lib/pdf-slides";
 
-const DEFAULT_GENERAL_MODEL = "gemini-3-flash-preview";
+const DEFAULT_GENERAL_MODEL = "gemini-3.1-flash-lite";
 const DEFAULT_LIVE_MODEL = "gemini-3.1-flash-live-preview";
 const DEFAULT_TTS_MODEL = "gemini-3.1-flash-tts-preview";
 

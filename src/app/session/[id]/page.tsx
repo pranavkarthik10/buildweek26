@@ -2,7 +2,7 @@ import { prisma } from "@/lib/db";
 import { ensureLocalUser } from "@/lib/local-user";
 import { redirect } from "next/navigation";
 import { SessionPlayer } from "@/components/session-player";
-import type { LectureDeck } from "@/lib/aiprof-types";
+import { parsePersistedLectureDeck } from "@/lib/persisted-deck";
 
 export const dynamic = "force-dynamic";
 
@@ -22,15 +22,7 @@ export default async function SessionPage({
 
   if (!session) redirect("/dashboard");
 
-  const lectureDeck: LectureDeck = {
-    deckId: session.deck.id,
-    deckTitle: session.deck.title,
-    courseName: session.deck.courseName ?? "",
-    summary: session.deck.summary ?? "",
-    studyStrategy: session.deck.studyStrategy ?? "",
-    totalSlides: session.deck.totalSlides,
-    slides: JSON.parse(session.deck.slides),
-  };
+  const lectureDeck = parsePersistedLectureDeck(session.deck);
 
   return (
     <SessionPlayer
@@ -40,6 +32,8 @@ export default async function SessionPage({
       initialCueIndex={session.currentCue}
       initialTeachingFormat={session.teachingFormat}
       initialCustomInstructions={session.customInstructions ?? ""}
+      initialBoardSnapshot={session.boardSnapshot ?? undefined}
+      initialBoardVersion={session.boardVersion}
     />
   );
 }

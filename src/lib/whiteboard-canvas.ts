@@ -17,6 +17,17 @@ function toPageY(percent: number) {
   return (percent / 100) * BOARD_H;
 }
 
+export function whiteboardPagePoint(x: number, y: number) {
+  return {
+    x: toPageX(clampPercent(x)),
+    y: toPageY(clampPercent(y)),
+  };
+}
+
+function clampPercent(value: number) {
+  return Math.max(0, Math.min(100, Number.isFinite(value) ? value : 0));
+}
+
 export function applyWhiteboardCanvasActions(
   editor: Editor,
   actions: WhiteboardCanvasAction[],
@@ -40,8 +51,7 @@ function actionToShape(action: WhiteboardCanvasAction) {
     return {
       id: shapeId,
       type: "text" as const,
-      x: toPageX(action.x),
-      y: toPageY(action.y),
+      ...whiteboardPagePoint(action.x, action.y),
       props: {
         richText: toRichText(action.text),
         size: "m" as const,
@@ -56,12 +66,11 @@ function actionToShape(action: WhiteboardCanvasAction) {
     return {
       id: shapeId,
       type: "geo" as const,
-      x: toPageX(action.x),
-      y: toPageY(action.y),
+      ...whiteboardPagePoint(action.x, action.y),
       props: {
         geo: action.geo,
-        w: Math.max(24, toPageX(action.w)),
-        h: Math.max(24, toPageY(action.h)),
+        w: Math.max(24, whiteboardPagePoint(action.w, 0).x),
+        h: Math.max(24, whiteboardPagePoint(0, action.h).y),
         color,
         fill: "none" as const,
         dash: "draw" as const,
@@ -71,19 +80,24 @@ function actionToShape(action: WhiteboardCanvasAction) {
   }
 
   if (action.type === "arrow") {
-    const x1 = toPageX(action.x1);
-    const y1 = toPageY(action.y1);
-    const x2 = toPageX(action.x2);
-    const y2 = toPageY(action.y2);
+    const start = whiteboardPagePoint(action.x1, action.y1);
+    const end = whiteboardPagePoint(action.x2, action.y2);
+    const x1 = start.x;
+    const y1 = start.y;
+    const x2 = end.x;
+    const y2 = end.y;
+    const originX = Math.min(x1, x2);
+    const originY = Math.min(y1, y2);
 
     return {
       id: shapeId,
       type: "arrow" as const,
-      x: Math.min(x1, x2),
-      y: Math.min(y1, y2),
+      x: originX,
+      y: originY,
       props: {
-        start: { x: x1, y: y1 },
-        end: { x: x2, y: y2 },
+        // tldraw arrow endpoints are local to the shape origin.
+        start: { x: x1 - originX, y: y1 - originY },
+        end: { x: x2 - originX, y: y2 - originY },
         color,
         size: "m" as const,
         arrowheadStart: "none" as const,
@@ -93,10 +107,7 @@ function actionToShape(action: WhiteboardCanvasAction) {
   }
 
   if (action.type === "draw" && action.points.length >= 2) {
-    const points = action.points.map((point) => ({
-      x: toPageX(point.x),
-      y: toPageY(point.y),
-    }));
+    const points = action.points.map((point) => whiteboardPagePoint(point.x, point.y));
 
     return {
       id: shapeId,

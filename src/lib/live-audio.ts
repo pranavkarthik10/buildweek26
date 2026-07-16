@@ -44,7 +44,7 @@ export class PcmAudioPlayer {
     let playbackDone = Promise.resolve();
     const scheduled = this.scheduleReady.then(async () => {
       const context = await this.getContext();
-      playbackDone = mimeType.startsWith("audio/pcm")
+      playbackDone = isPcmAudioMimeType(mimeType)
         ? this.schedulePcmSource(
             context,
             base64Audio,
@@ -94,6 +94,15 @@ export class PcmAudioPlayer {
     playbackRate = 1,
   ) {
     const bytes = base64ToUint8Array(base64Pcm);
+
+    if (bytes.byteLength === 0) {
+      throw new Error("Received an empty PCM audio chunk.");
+    }
+
+    if (bytes.byteLength % 2 !== 0) {
+      throw new Error("Received an invalid 16-bit PCM audio chunk.");
+    }
+
     const samples = new Int16Array(
       bytes.buffer,
       bytes.byteOffset,
@@ -195,6 +204,23 @@ export class PcmAudioPlayer {
 
     return this.context;
   }
+}
+
+/**
+ * Gemini TTS returns raw signed 16-bit PCM as `audio/l16`, while other audio
+ * paths use the equivalent `audio/pcm` label. Neither is a browser audio
+ * container, so both must be scheduled directly instead of passed to
+ * `decodeAudioData`.
+ */
+export function isPcmAudioMimeType(mimeType?: string) {
+  const mediaType = mimeType?.split(";", 1)[0]?.trim().toLowerCase();
+
+  return (
+    mediaType === "audio/pcm" ||
+    mediaType === "audio/l16" ||
+    mediaType === "audio/raw" ||
+    mediaType === "audio/x-raw"
+  );
 }
 
 function base64ToUint8Array(base64: string) {

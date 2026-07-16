@@ -7,6 +7,7 @@ export async function POST(request: Request) {
     const body = (await request.json()) as {
       text?: string;
       voiceName?: string;
+      cache?: "lecture" | "none";
     };
 
     if (!body.text?.trim()) {
@@ -19,12 +20,14 @@ export async function POST(request: Request) {
     const speech = await synthesizeLectureSpeech({
       text: body.text,
       voiceName: body.voiceName,
+      cache: body.cache !== "none",
     });
 
     console.log("[aiprof] tts generated", {
       chars: body.text.length,
       durationMs: speech.durationMs,
       model: speech.model,
+      cacheHit: speech.cacheHit,
     });
 
     return NextResponse.json(speech);

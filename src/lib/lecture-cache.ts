@@ -11,6 +11,7 @@ import path from "node:path";
 
 import type { LectureDeck } from "@/lib/aiprof-types";
 import {
+  getObject,
   isObjectStorageConfigured,
   objectUrlForKey,
   putObject,
@@ -31,7 +32,16 @@ export async function readCachedDeck(hash: string) {
     const data = await readFile(cachePath(hash), "utf8");
     return JSON.parse(data) as LectureDeck;
   } catch {
-    return null;
+    if (!isObjectStorageConfigured()) return null;
+    try {
+      const data = await getObject(`decks/${hash}/manifest.json`);
+      const deck = JSON.parse(data.toString("utf8")) as LectureDeck;
+      if (!deck || !Array.isArray(deck.slides) || !deck.slides.length) return null;
+      await writeCachedDeck(hash, deck).catch(() => undefined);
+      return deck;
+    } catch {
+      return null;
+    }
   }
 }
 

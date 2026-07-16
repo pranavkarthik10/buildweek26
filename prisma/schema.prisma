@@ -13,6 +13,8 @@ model User {
   image         String?
   decks         Deck[]
   studySessions StudySession[]
+  conceptStates ConceptState[]
+  reviewItems   ReviewItem[]
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 }
@@ -44,7 +46,15 @@ model StudySession {
   currentCue      Int             @default(0)
   status          SessionStatus   @default(active)
   progressPercent Int             @default(0)
+  boardSnapshot   String?
+  boardVersion    Int             @default(0)
+  lastEventSeq    Int             @default(0)
+  lastProgressSeq Int             @default(0)
   slideProgress   SlideProgress[]
+  artifacts       Artifact[]
+  turns           SessionTurn[]
+  events          SessionEvent[]
+  boardDocument   BoardDocument?
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
   completedAt     DateTime?
@@ -76,4 +86,113 @@ enum TeachingFormat {
   lecture
   small_class
   tutoring
+}
+
+model Artifact {
+  id          String          @id @default(cuid())
+  sessionId   String?
+  jobKey      String          @unique
+  status      RenderJobStatus @default(preview)
+  engine      RenderEngine    @default(hyperframes)
+  spec        String
+  previewUrl  String?
+  artifactUrl String?
+  error       String?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  session StudySession? @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+}
+
+model SessionTurn {
+  id                String       @id @default(cuid())
+  sessionId         String
+  role              String
+  modality          String
+  transcript        String?
+  startedAtMs       Int?
+  durationMs        Int?
+  toolCallMetadata  String?
+  signalKey         String?
+  createdAt         DateTime     @default(now())
+
+  session StudySession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, createdAt])
+  @@unique([sessionId, signalKey])
+}
+
+model SessionEvent {
+  id             String       @id @default(cuid())
+  sessionId      String
+  clientEventId  String?
+  sequence       Int
+  kind           String
+  slideIndex     Int?
+  relativeTimeMs Int?
+  payload        String
+  createdAt      DateTime     @default(now())
+
+  session StudySession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, sequence])
+  @@unique([sessionId, clientEventId])
+  @@index([sessionId, createdAt])
+}
+
+model BoardDocument {
+  id              String      @id @default(cuid())
+  sessionId       String      @unique
+  version         Int         @default(0)
+  snapshot        String
+  semanticSummary String?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  session StudySession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+}
+
+model ConceptState {
+  id                       String   @id @default(cuid())
+  userId                   String
+  conceptKey               String
+  masteryScore             Float    @default(0)
+  misconceptionEvidence    String?
+  preferredExplanationStyle String?
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, conceptKey])
+  @@index([userId, updatedAt])
+}
+
+model ReviewItem {
+  id             String   @id @default(cuid())
+  userId         String
+  conceptKey     String
+  prompt         String
+  dueAt          DateTime
+  intervalSec    Int      @default(86400)
+  latestOutcome  String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, dueAt])
+}
+
+enum RenderJobStatus {
+  preview
+  queued
+  processing
+  completed
+  failed
+}
+
+enum RenderEngine {
+  hyperframes
+  manim
 }

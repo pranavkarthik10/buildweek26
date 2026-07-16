@@ -44,7 +44,7 @@ export type WhiteboardStroke = {
 };
 
 /** How the whiteboard renders AI / tutor output. */
-export type WhiteboardMode = "canvas" | "manim" | "latex" | "text" | "strokes";
+export type WhiteboardMode = "canvas" | "manim" | "latex" | "text" | "strokes" | "explainer";
 
 export type WhiteboardContent = {
   mode: WhiteboardMode;
@@ -61,6 +61,18 @@ export type WhiteboardContent = {
   text?: string;
   /** Legacy vector annotations overlaid on slides. */
   strokes?: WhiteboardStroke[];
+  /** Inline preview or finished artifact from the visual explainer pipeline. */
+  explainerId?: string;
+  explainerUrl?: string;
+  explainerVideoUrl?: string;
+  explainerStatus?: "preview" | "queued" | "processing" | "completed" | "failed";
+  explainerError?: string;
+};
+
+export type TutorSource = {
+  slideNumber: number;
+  title: string;
+  region?: string;
 };
 
 /** Modes the lecture agent may request for a multi-step whiteboard session. */

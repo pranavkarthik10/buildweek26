@@ -47,7 +47,7 @@ export function UploadScreen({
           <div className="mb-3 flex items-center justify-center gap-2.5">
             <span className="h-2.5 w-2.5 rounded-full bg-[var(--accent)]" />
             <h1 className="font-display text-3xl font-semibold tracking-tight text-[var(--ink-strong)]">
-              Aiprof
+              studydeck
             </h1>
           </div>
           <p className="text-sm text-[var(--muted)]">

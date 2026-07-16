@@ -30,6 +30,7 @@ const MODE_LABELS: Record<WhiteboardContent["mode"], string> = {
   latex: "Formula",
   text: "Notes",
   strokes: "Diagram",
+  explainer: "Visual explainer",
 };
 
 type WhiteboardPanelProps = {
@@ -37,6 +38,8 @@ type WhiteboardPanelProps = {
   onClose?: () => void;
   className?: string;
   canvasRef?: React.RefObject<WhiteboardTldrawHandle | null>;
+  initialVersion?: number;
+  onSnapshotChange?: (snapshot: string) => void;
   status?: string;
 };
 
@@ -45,6 +48,8 @@ export function WhiteboardPanel({
   onClose,
   className = "",
   canvasRef,
+  initialVersion,
+  onSnapshotChange,
   status,
 }: WhiteboardPanelProps) {
   const [fullscreen, setFullscreen] = useState(false);
@@ -119,7 +124,12 @@ export function WhiteboardPanel({
       </header>
 
       <div className="relative min-h-0 flex-1 overflow-hidden">
-        <WhiteboardBody content={content} canvasRef={canvasRef} />
+        <WhiteboardBody
+          content={content}
+          canvasRef={canvasRef}
+          initialVersion={initialVersion}
+          onSnapshotChange={onSnapshotChange}
+        />
       </div>
     </aside>
   );
@@ -128,14 +138,23 @@ export function WhiteboardPanel({
 function WhiteboardBody({
   content,
   canvasRef,
+  initialVersion,
+  onSnapshotChange,
 }: {
   content: WhiteboardContent;
   canvasRef?: React.RefObject<WhiteboardTldrawHandle | null>;
+  initialVersion?: number;
+  onSnapshotChange?: (snapshot: string) => void;
 }) {
   switch (content.mode) {
     case "canvas":
       return (
-        <TldrawCanvas ref={canvasRef} snapshot={content.tldrawSnapshot} />
+        <TldrawCanvas
+          ref={canvasRef}
+          snapshot={content.tldrawSnapshot}
+          initialVersion={initialVersion}
+          onSnapshotChange={onSnapshotChange}
+        />
       );
     case "manim":
       return <ManimView content={content} />;
@@ -145,9 +164,54 @@ function WhiteboardBody({
       return <TextView content={content} />;
     case "strokes":
       return <StrokesView strokes={content.strokes ?? []} />;
+    case "explainer":
+      return <ExplainerView content={content} />;
     default:
       return null;
   }
+}
+
+function ExplainerView({ content }: { content: WhiteboardContent }) {
+  const url = content.explainerVideoUrl ?? content.explainerUrl;
+  if (!url) {
+    return (
+      <div className="flex h-full items-center justify-center p-8 text-center text-sm text-[#6b6b65]">
+        Preparing a visual explainer…
+      </div>
+    );
+  }
+
+  if (content.explainerVideoUrl) {
+    return (
+      <video
+        src={content.explainerVideoUrl}
+        controls
+        autoPlay
+        playsInline
+        className="h-full w-full bg-[#0d111a] object-contain"
+      />
+    );
+  }
+
+  return (
+    <div className="relative h-full w-full bg-[#0d111a]">
+      {content.explainerStatus === "failed" ? (
+        <div
+          role="status"
+          className="absolute inset-x-4 top-4 z-10 rounded-xl border border-amber-300/30 bg-[#211b0f]/95 px-4 py-3 text-xs leading-5 text-amber-100 shadow-xl backdrop-blur"
+        >
+          The downloadable video could not be rendered, so studydeck kept the
+          interactive visual available. {content.explainerError ?? "You can continue learning here."}
+        </div>
+      ) : null}
+      <iframe
+        title={content.title ?? "studydeck visual explainer"}
+        src={url}
+        className="h-full w-full border-0 bg-[#0d111a]"
+        sandbox="allow-scripts"
+      />
+    </div>
+  );
 }
 
 function ManimView({ content }: { content: WhiteboardContent }) {

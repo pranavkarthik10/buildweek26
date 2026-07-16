@@ -2,17 +2,26 @@
 
 import Image from "next/image";
 import { useEffect, useRef, useState } from "react";
+import { Mic, MicOff } from "lucide-react";
 
 import type {
   LectureCue,
   LectureDeck,
   LectureSlide,
   TeachingFormat,
+  TutorSource,
   WhiteboardContent,
 } from "@/lib/aiprof-types";
-import type { TeachingFocus } from "@/lib/whiteboard-types";
+import type {
+  TeachingFocus,
+} from "@/lib/whiteboard-types";
 import { WhiteboardPanel } from "@/components/whiteboard-panel";
 import type { WhiteboardTldrawHandle } from "@/components/whiteboard-tldraw";
+import {
+  isRealtimeActive,
+  RealtimeTutor,
+  type RealtimeTutorState,
+} from "@/components/realtime-tutor";
 
 function CursorPointer({
   x,
@@ -119,15 +128,28 @@ type Props = {
   onNextCue: () => void;
   onPrevCue: () => void;
   onJumpToSlide: (index: number) => void;
-  onAskQuestion: (question: string) => Promise<void>;
+  onAskQuestion: (question: string, options?: { includeBoardImage?: boolean }) => Promise<void>;
   onResume: () => void;
   onSpeakAnswer: (answer: string) => Promise<void>;
   isAnswering: boolean;
   isSpeakingAnswer: boolean;
   answer: string;
+  checkpointQuestion: string;
+  answerSources: TutorSource[];
   questionError: string;
   liveStatus: string;
   liveError: string;
+  sessionId?: string;
+  onActivateRealtime?: () => void;
+  onRealtimeSessionActivate?: () => void;
+  realtimeConnectRequest?: number;
+  realtimeState?: RealtimeTutorState;
+  onRealtimeStateChange?: (state: RealtimeTutorState) => void;
+  onRealtimeFallback?: () => void;
+  onRealtimeFocus?: (focus: TeachingFocus) => void;
+  onRealtimePoint?: (point: { x: number; y: number; label: string }) => void;
+  onRealtimeJumpToSlide?: (slideIndex: number) => void;
+  onRealtimeArtifact?: (artifact: { id: string; status: string; url?: string }) => void;
   isAudioPaused: boolean;
   speechSpeed: number;
   onSpeedChange: (speed: number) => void;
@@ -142,6 +164,9 @@ type Props = {
   whiteboardStatus?: string;
   teachingFocus: TeachingFocus;
   canvasRef?: React.RefObject<WhiteboardTldrawHandle | null>;
+  initialBoardVersion?: number;
+  onWhiteboardSnapshotChange?: (snapshot: string) => void;
+  onWhiteboardOpen?: () => void;
   onWhiteboardClose?: () => void;
   onToggleAudioPause?: () => void;
   onEndSession?: () => void;
@@ -163,9 +188,22 @@ export function LectureWorkspace({
   isAnswering,
   isSpeakingAnswer,
   answer,
+  checkpointQuestion,
+  answerSources,
   questionError,
   liveStatus,
   liveError,
+  sessionId,
+  onActivateRealtime,
+  onRealtimeSessionActivate,
+  realtimeConnectRequest,
+  realtimeState = "idle",
+  onRealtimeStateChange,
+  onRealtimeFallback,
+  onRealtimeFocus,
+  onRealtimePoint,
+  onRealtimeJumpToSlide,
+  onRealtimeArtifact,
   isAudioPaused,
   speechSpeed,
   onSpeedChange,
@@ -177,6 +215,9 @@ export function LectureWorkspace({
   whiteboardStatus,
   teachingFocus,
   canvasRef,
+  initialBoardVersion,
+  onWhiteboardSnapshotChange,
+  onWhiteboardOpen,
   onWhiteboardClose,
   onToggleAudioPause,
   onEndSession,
@@ -184,8 +225,13 @@ export function LectureWorkspace({
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [railOpen, setRailOpen] = useState(false);
+  const [recallOpen, setRecallOpen] = useState(false);
+  const [recallBusy, setRecallBusy] = useState<string | null>(null);
+  const [reviewItems, setReviewItems] = useState<ReviewItem[]>([]);
   const [questionDraft, setQuestionDraft] = useState("");
-  const [inputMode, setInputMode] = useState<"voice" | "text">("voice");
+  const [includeBoardImage, setIncludeBoardImage] = useState(false);
+  const [isSubmittingQuestion, setIsSubmittingQuestion] = useState(false);
+  const [inputMode, setInputMode] = useState<"text" | "realtime">("text");
   const [isListening, setIsListening] = useState(false);
   const [voiceError, setVoiceError] = useState("");
   const [displayedCue, setDisplayedCue] = useState<LectureCue | null>(activeCue);
@@ -194,6 +240,32 @@ export function LectureWorkspace({
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const cursorHideTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cursorFrameRef = useRef<number | null>(null);
+  const isCheckpoint = Boolean(checkpointQuestion.trim());
+  const realtimeActive = isRealtimeActive(realtimeState);
+  const isBoardVisible = whiteboardOpen && teachingFocus !== "slides";
+  const hasBoardContent = Boolean(
+    whiteboardOpen ||
+      whiteboardContent.tldrawSnapshot ||
+      whiteboardContent.text?.trim() ||
+      whiteboardContent.latex?.trim() ||
+      whiteboardContent.manimCode?.trim() ||
+      whiteboardContent.strokes?.length ||
+      whiteboardContent.explainerId ||
+      whiteboardContent.explainerUrl ||
+      whiteboardContent.explainerVideoUrl,
+  );
+
+  useEffect(() => {
+    if (!sessionId) return;
+    let cancelled = false;
+    fetch("/api/learning/signals?dueOnly=true&limit=4", { cache: "no-store" })
+      .then((response) => response.ok ? response.json() : null)
+      .then((payload: { reviewItems?: ReviewItem[] } | null) => {
+        if (!cancelled) setReviewItems(payload?.reviewItems ?? []);
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [sessionId]);
 
   const totalSlides = lectureDeck.slides.length;
   const totalCues = activeSlide?.cues.length ?? 0;
@@ -210,6 +282,21 @@ export function LectureWorkspace({
   useEffect(() => {
     return () => recognitionRef.current?.stop();
   }, []);
+
+  useEffect(() => {
+    if (!isCheckpoint) return;
+
+    // A checkpoint is an explicit turn-taking moment. Open the composer and
+    // default to text so the learner always has a visible way to respond,
+    // even when browser speech recognition is unavailable.
+    setDrawerOpen(true);
+    setInputMode("text");
+    setQuestionDraft("");
+    setVoiceError("");
+    const focusTimer = window.setTimeout(() => textareaRef.current?.focus(), 120);
+
+    return () => window.clearTimeout(focusTimer);
+  }, [isCheckpoint]);
 
   useEffect(() => {
     if (cursorHideTimeoutRef.current) {
@@ -260,13 +347,33 @@ export function LectureWorkspace({
   }
 
   async function handleAsk() {
-    if (!questionDraft.trim()) return;
-    await onAskQuestion(questionDraft.trim());
+    if (!questionDraft.trim() || isSubmittingQuestion) return;
+    setIsSubmittingQuestion(true);
+    try {
+      await onAskQuestion(questionDraft.trim(), { includeBoardImage });
+    } finally {
+      setIsSubmittingQuestion(false);
+    }
+  }
+
+  function handleRealtimeMode() {
+    recognitionRef.current?.stop();
+    setIsListening(false);
+    setVoiceError("");
+    setQuestionDraft("");
+    setInputMode("realtime");
+    onActivateRealtime?.();
+  }
+
+  function handleRealtimeSessionActivate() {
+    setInputMode("realtime");
+    onRealtimeSessionActivate?.();
   }
 
   function handleResume() {
     recognitionRef.current?.stop();
     setIsListening(false);
+    setIsSubmittingQuestion(false);
     onResume();
     setDrawerOpen(false);
     setQuestionDraft("");
@@ -315,7 +422,13 @@ export function LectureWorkspace({
   }
 
   const liveStatusDot =
-    isAnswering ? "#d97706" : isLive ? "#4ade80" : "rgba(255,255,255,0.25)";
+    isCheckpoint && !answer
+      ? "var(--cursor-blue)"
+      : isAnswering
+        ? "#d97706"
+        : isLive
+          ? "#4ade80"
+          : "rgba(255,255,255,0.25)";
 
   return (
     <div className="relative flex h-screen flex-col overflow-hidden bg-[#111]">
@@ -329,7 +442,7 @@ export function LectureWorkspace({
             className="h-2 w-2 rounded-full"
             style={{
               background: liveStatusDot,
-              boxShadow: isLive && !isAnswering
+              boxShadow: (isLive && !isAnswering) || (isCheckpoint && !answer)
                 ? `0 0 6px ${liveStatusDot}`
                 : "none",
             }}
@@ -346,11 +459,48 @@ export function LectureWorkspace({
             </>
           )}
           <span className="hidden text-xs text-white/25 sm:inline">
-            {liveStatus === "speaking" ? "professor speaking" : liveStatus}
+            {liveStatus === "speaking"
+              ? "professor speaking"
+              : liveStatus === "checkpoint"
+                ? "waiting for your answer"
+                : liveStatus}
           </span>
         </div>
         <div className="flex items-center gap-1">
           <SpeedSelect value={speechSpeed} onChange={onSpeedChange} />
+          {hasBoardContent && (onWhiteboardOpen || onWhiteboardClose) ? (
+            <button
+              type="button"
+              onClick={() => {
+                if (isBoardVisible) {
+                  onWhiteboardClose?.();
+                } else {
+                  onWhiteboardOpen?.();
+                }
+              }}
+              className="rounded-md px-3 py-1.5 text-xs text-white/55 transition hover:bg-white/6 hover:text-white/80"
+              aria-label={isBoardVisible ? "Hide whiteboard" : "Show whiteboard"}
+            >
+              {isBoardVisible ? "Hide board" : "Board"}
+            </button>
+          ) : null}
+          <RealtimeTutor
+            deck={lectureDeck}
+            sessionId={sessionId}
+            currentSlideIndex={currentSlideIndex}
+            teachingFormat={teachingFormat}
+            customInstructions={customInstructions}
+            canvasRef={canvasRef}
+            onActivate={handleRealtimeSessionActivate}
+            realtimeEnabled={inputMode === "realtime"}
+            connectRequest={realtimeConnectRequest}
+            onStateChange={onRealtimeStateChange}
+            onFallback={onRealtimeFallback}
+            onFocus={onRealtimeFocus}
+            onPoint={onRealtimePoint}
+            onJumpToSlide={onRealtimeJumpToSlide ?? onJumpToSlide}
+            onArtifact={onRealtimeArtifact}
+          />
           {onToggleAudioPause && (
             <button
               type="button"
@@ -374,6 +524,16 @@ export function LectureWorkspace({
           >
             {railOpen ? "Hide outline" : "Outline"}
           </button>
+          {sessionId ? (
+            <button
+              type="button"
+              onClick={() => setRecallOpen((v) => !v)}
+              aria-label="Open active recall queue"
+              className="rounded-md px-3 py-1.5 text-xs text-white/40 transition hover:bg-white/6 hover:text-white/70"
+            >
+              Recall{reviewItems.length ? ` · ${reviewItems.length}` : ""}
+            </button>
+          ) : null}
           {onEndSession && (
             <button
               type="button"
@@ -394,6 +554,33 @@ export function LectureWorkspace({
           onClose={() => setSettingsOpen(false)}
         />
       )}
+
+      {recallOpen && sessionId ? (
+        <RecallPopover
+          items={reviewItems}
+          busyId={recallBusy}
+          onClose={() => setRecallOpen(false)}
+          onOutcome={async (item, outcome) => {
+            setRecallBusy(item.id);
+            try {
+              const response = await fetch("/api/learning/signals", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  sessionId,
+                  concept: item.conceptKey,
+                  outcome,
+                  evidence: `Active recall response for: ${item.prompt}`,
+                  prompt: item.prompt,
+                }),
+              });
+              if (response.ok) setReviewItems((current) => current.filter((entry) => entry.id !== item.id));
+            } finally {
+              setRecallBusy(null);
+            }
+          }}
+        />
+      ) : null}
 
       {/* ------------------------------------------------------------------ */}
       {/* Main area                                                           */}
@@ -477,6 +664,8 @@ export function LectureWorkspace({
                 <WhiteboardPanel
                   content={whiteboardContent}
                   canvasRef={canvasRef}
+                  initialVersion={initialBoardVersion}
+                  onSnapshotChange={onWhiteboardSnapshotChange}
                   status={whiteboardStatus}
                   onClose={onWhiteboardClose}
                   className="h-[min(68vh,calc(100vh-13rem))]"
@@ -491,10 +680,14 @@ export function LectureWorkspace({
                   {activeCue && isLive && !isAnswering ? (
                     <p className="mt-1 truncate">{activeCue.emphasis}</p>
                   ) : null}
-                  {isAnswering ? (
+                  {isCheckpoint ? (
+                    <p className="mt-1 text-[var(--cursor-blue)]">
+                      Checkpoint · your response is needed
+                    </p>
+                  ) : isAnswering ? (
                     <p className="mt-1">Lecture paused while answering.</p>
                   ) : null}
-                  {liveError ? (
+                  {liveError && !isCheckpoint ? (
                     <p className="mt-1 text-amber-300">{liveError}</p>
                   ) : null}
                 </div>
@@ -694,16 +887,16 @@ export function LectureWorkspace({
               <span
                 className="h-2 w-2 rounded-full"
                 style={{
-                  background: answer
+                  background: answer || isCheckpoint
                     ? "var(--cursor-blue)"
                     : "rgba(255,255,255,0.2)",
-                  boxShadow: answer
+                  boxShadow: answer || isCheckpoint
                     ? "0 0 6px var(--cursor-blue-glow)"
                     : "none",
                 }}
               />
               <p className="text-sm font-semibold text-white/80">
-                {answer ? "Tutor response" : "Ask a question"}
+                {answer ? "Tutor response" : isCheckpoint ? "Your turn" : "Ask a question"}
               </p>
             </div>
             <button
@@ -728,6 +921,12 @@ export function LectureWorkspace({
                 }}
               >
                 <MarkdownLite text={answer} />
+                {answerSources.length ? (
+                  <div className="mt-4 border-t border-white/10 pt-3 text-xs text-white/45" aria-label="Answer sources">
+                    <span className="font-semibold text-white/65">Source-grounded in: </span>
+                    {answerSources.map((source) => `Slide ${source.slideNumber}: ${source.title}`).join(" · ")}
+                  </div>
+                ) : null}
               </div>
               <div className="flex gap-2">
                 <button
@@ -757,13 +956,29 @@ export function LectureWorkspace({
           ) : (
             /* Question input view — Clicky text field style */
             <div className="space-y-3">
+              {isCheckpoint ? (
+                <div
+                  className="rounded-xl border border-[var(--cursor-blue)]/30 bg-[var(--cursor-blue-bg)] px-4 py-3"
+                  aria-live="polite"
+                >
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--cursor-blue)]">
+                    Checkpoint question
+                  </p>
+                  <p className="mt-2 text-sm leading-6 text-white/85">
+                    {checkpointQuestion}
+                  </p>
+                  <p className="mt-2 text-xs text-white/45">
+                    Write your thinking below. The professor will respond, then you can continue.
+                  </p>
+                </div>
+              ) : null}
               <div className="grid grid-cols-2 gap-2 rounded-full bg-white/6 p-1">
-                {(["voice", "text"] as const).map((mode) => (
+                {(["text", "realtime"] as const).map((mode) => (
                   <button
                     key={mode}
                     type="button"
-                    onClick={() => setInputMode(mode)}
-                    className="rounded-full px-3 py-1.5 text-xs font-semibold capitalize transition"
+                    onClick={() => mode === "realtime" ? handleRealtimeMode() : setInputMode("text")}
+                    className="rounded-full px-3 py-1.5 text-xs font-semibold transition"
                     style={{
                       background:
                         inputMode === mode
@@ -775,32 +990,71 @@ export function LectureWorkspace({
                           : "rgba(255,255,255,0.38)",
                     }}
                   >
-                    {mode}
+                    {mode === "realtime" ? "Realtime tutor" : "Text"}
                   </button>
                 ))}
               </div>
-              {inputMode === "voice" ? (
-                <button
-                  type="button"
-                  onClick={toggleListening}
-                  className="flex min-h-28 w-full flex-col items-center justify-center rounded-xl px-4 py-5 text-center transition"
+              {inputMode === "realtime" ? (
+                <div
+                  className="rounded-xl px-4 py-5"
                   style={{
-                    background: isListening
+                    background: realtimeActive
                       ? "var(--cursor-blue-bg)"
                       : "rgba(255,255,255,0.07)",
                     border: "0.5px solid rgba(255,255,255,0.10)",
-                    color: isListening
-                      ? "rgba(255,255,255,0.9)"
-                      : "rgba(255,255,255,0.62)",
                   }}
+                  aria-live="polite"
                 >
-                  <span className="mb-2 text-xl">{isListening ? "Listening" : "Tap to ask aloud"}</span>
-                  <span className="max-w-sm text-xs leading-5 text-white/35">
-                    {questionDraft || "Your transcript will appear here before you send it."}
-                  </span>
-                </button>
+                  <div className="flex items-start gap-3">
+                    <span
+                      className="mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full"
+                      style={{
+                        background: realtimeActive
+                          ? "#4ade80"
+                          : realtimeState === "error"
+                            ? "#fbbf24"
+                            : "var(--cursor-blue)",
+                        boxShadow: realtimeActive
+                          ? "0 0 10px rgba(74,222,128,0.7)"
+                          : "0 0 10px var(--cursor-blue-glow)",
+                      }}
+                    />
+                    <div>
+                      <p className="text-sm font-semibold text-white/85">
+                        {realtimeState === "speaking"
+                          ? "Professor is speaking"
+                          : realtimeState === "working"
+                            ? "Professor is using a tool"
+                            : realtimeState === "connected"
+                              ? "Realtime tutor is listening"
+                              : realtimeState === "connecting"
+                                ? "Connecting realtime tutor..."
+                                : realtimeState === "error"
+                                  ? "Realtime tutor needs attention"
+                                  : "Switching to realtime tutor..."}
+                      </p>
+                      <p className="mt-1 text-xs leading-5 text-white/45">
+                        {realtimeActive
+                          ? "Speak naturally. You can interrupt, ask follow-ups, or ask the professor to use the board."
+                          : realtimeState === "error"
+                            ? "The regular text tutor is still available, or try realtime again."
+                            : "Your microphone will turn on automatically; there is no separate listen button."}
+                      </p>
+                    </div>
+                  </div>
+                  {realtimeState === "error" ? (
+                    <button
+                      type="button"
+                      onClick={onActivateRealtime}
+                      className="mt-4 rounded-full bg-[var(--cursor-blue)] px-4 py-2 text-xs font-semibold text-white shadow-[0_0_12px_var(--cursor-blue-glow)]"
+                    >
+                      Try realtime again
+                    </button>
+                  ) : null}
+                </div>
               ) : (
-                <textarea
+                <div className="relative">
+                  <textarea
                   ref={textareaRef}
                   value={questionDraft}
                   onChange={(e) => setQuestionDraft(e.target.value)}
@@ -809,28 +1063,80 @@ export function LectureWorkspace({
                       void handleAsk();
                     }
                   }}
-                  placeholder="What do you want to understand better?"
+                  placeholder={
+                    isCheckpoint
+                      ? "Type your reasoning here…"
+                      : "What do you want to understand better?"
+                  }
                   rows={4}
-                  className="w-full resize-none rounded-xl px-4 py-3 text-sm leading-7 text-white/80 outline-none transition"
+                  className="w-full resize-none rounded-xl px-4 py-3 pr-14 text-sm leading-7 text-white/80 outline-none transition"
                   style={{
                     background: "rgba(255,255,255,0.07)",
                     border: "0.5px solid rgba(255,255,255,0.10)",
                     caretColor: "var(--cursor-blue)",
                   }}
-                />
+                  />
+                  <button
+                    type="button"
+                    onClick={toggleListening}
+                    className="absolute bottom-3 right-3 flex h-9 w-9 items-center justify-center rounded-full transition"
+                    style={{
+                      background: isListening ? "var(--cursor-blue)" : "rgba(255,255,255,0.1)",
+                      color: isListening ? "#fff" : "rgba(255,255,255,0.55)",
+                      boxShadow: isListening ? "0 0 12px var(--cursor-blue-glow)" : "none",
+                    }}
+                    aria-label={isListening ? "Stop transcription" : "Start voice transcription"}
+                    title={isListening ? "Stop transcription" : "Transcribe with microphone"}
+                  >
+                    {isListening ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+                  </button>
+                </div>
               )}
               {(questionError || voiceError) && (
                 <p className="text-xs text-amber-400">{questionError || voiceError}</p>
               )}
+              {inputMode === "text" && hasBoardContent ? (
+                <label className="flex items-center gap-2 text-xs text-white/40">
+                  <input
+                    type="checkbox"
+                    checked={includeBoardImage}
+                    onChange={(event) => setIncludeBoardImage(event.target.checked)}
+                    className="h-3.5 w-3.5 accent-[var(--cursor-blue)]"
+                  />
+                  Include a board image for visual inspection
+                </label>
+              ) : null}
               <div className="flex items-center justify-between gap-3">
+                <span className="hidden">
+                  {inputMode === "text"
+                    ? "⌘ + Enter to send"
+                    : isListening
+                      ? "Listening now… tap to stop"
+                      : "Tap the microphone, then send"}
+                </span>
+                <span className="hidden">
+                  {inputMode === "text"
+                    ? isListening
+                      ? "Listening now — tap mic to stop"
+                      : "Use the mic to transcribe, then send"
+                    : realtimeActive
+                      ? "Speak naturally — the tutor detects your turn"
+                      : "Connecting realtime tutor…"}
+                </span>
                 <span className="text-xs text-white/20">
-                  {inputMode === "text" ? "⌘ + Enter to send" : "Stop speaking, then send"}
+                  {inputMode === "text"
+                    ? isListening
+                      ? "Listening now - tap mic to stop"
+                      : "Use the mic to transcribe, then send"
+                    : realtimeActive
+                      ? "Speak naturally - the tutor detects your turn"
+                      : "Connecting realtime tutor..."}
                 </span>
                 <button
                   type="button"
                   onClick={handleAsk}
-                  disabled={isAnswering || !questionDraft.trim()}
-                  className="rounded-full px-5 py-2 text-sm font-semibold text-white transition disabled:cursor-not-allowed disabled:opacity-35"
+                  disabled={isSubmittingQuestion || !questionDraft.trim()}
+                  className={`rounded-full px-5 py-2 text-sm font-semibold text-white transition disabled:cursor-not-allowed disabled:opacity-35 ${inputMode === "realtime" ? "hidden" : ""}`}
                   style={{
                     background: questionDraft.trim()
                       ? "var(--cursor-blue)"
@@ -840,7 +1146,7 @@ export function LectureWorkspace({
                       : "none",
                   }}
                 >
-                  {isAnswering ? "Answering…" : "Ask"}
+                  {isSubmittingQuestion ? "Thinking…" : isCheckpoint ? "Send response" : "Ask"}
                 </button>
               </div>
             </div>
@@ -856,6 +1162,68 @@ export function LectureWorkspace({
         />
       )}
     </div>
+  );
+}
+
+type ReviewItem = {
+  id: string;
+  conceptKey: string;
+  prompt: string;
+  dueAt: string;
+  latestOutcome?: string | null;
+};
+
+function RecallPopover({
+  items,
+  busyId,
+  onClose,
+  onOutcome,
+}: {
+  items: ReviewItem[];
+  busyId: string | null;
+  onClose: () => void;
+  onOutcome: (item: ReviewItem, outcome: "correct" | "incorrect") => Promise<void>;
+}) {
+  return (
+    <aside className="absolute right-4 top-14 z-50 w-[min(24rem,calc(100vw-2rem))] rounded-2xl border border-white/10 bg-[#181818] p-4 shadow-2xl" aria-label="Active recall queue">
+      <div className="mb-3 flex items-center justify-between">
+        <div>
+          <p className="text-sm font-semibold text-white/80">Active recall</p>
+          <p className="mt-0.5 text-[11px] text-white/35">One honest answer beats another passive replay.</p>
+        </div>
+        <button type="button" onClick={onClose} className="rounded-full bg-white/6 px-2 py-1 text-xs text-white/40 hover:text-white/70">Close</button>
+      </div>
+      {items.length ? (
+        <div className="space-y-3">
+          {items.map((item) => (
+            <div key={item.id} className="rounded-xl border border-white/8 bg-white/[0.04] p-3">
+              <p className="text-[10px] uppercase tracking-[0.16em] text-[var(--cursor-blue)]">{item.conceptKey}</p>
+              <p className="mt-2 text-sm leading-6 text-white/75">{item.prompt}</p>
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  disabled={busyId === item.id}
+                  onClick={() => void onOutcome(item, "incorrect")}
+                  className="rounded-lg bg-white/6 px-2 py-2 text-xs text-white/45 hover:bg-white/10 hover:text-white/70 disabled:opacity-40"
+                >
+                  Need another pass
+                </button>
+                <button
+                  type="button"
+                  disabled={busyId === item.id}
+                  onClick={() => void onOutcome(item, "correct")}
+                  className="rounded-lg bg-[var(--cursor-blue-bg)] px-2 py-2 text-xs font-semibold text-white/75 hover:bg-[var(--cursor-blue)] disabled:opacity-40"
+                >
+                  I can explain it
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="rounded-xl bg-white/[0.04] px-3 py-4 text-sm leading-6 text-white/45">You are caught up. The professor will add a review card when it sees a misconception or teach-back.</p>
+      )}
+    </aside>
   );
 }
 
