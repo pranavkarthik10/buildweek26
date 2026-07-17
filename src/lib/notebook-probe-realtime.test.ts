@@ -1,0 +1,23 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  buildNotebookProbeRealtimeInstructions,
+  NOTEBOOK_PROBE_REALTIME_SECRET_TTL_SECONDS,
+} from "@/lib/notebook-probe-realtime";
+
+describe("notebook probe realtime instructions", () => {
+  it("keeps narration bound to Terra beats and interruption-safe", () => {
+    const instructions = buildNotebookProbeRealtimeInstructions();
+
+    expect(instructions).toContain("ascending beat order");
+    expect(instructions).toContain("request_ink_plan");
+    expect(instructions).toContain("stage_ink_beat");
+    expect(instructions).toContain("Never stage several beats in advance");
+    expect(instructions).toContain("Only make visual claims");
+    expect(instructions).toContain("If the learner interrupts");
+  });
+
+  it("uses a short-lived secret", () => {
+    expect(NOTEBOOK_PROBE_REALTIME_SECRET_TTL_SECONDS).toBe(300);
+  });
+});
