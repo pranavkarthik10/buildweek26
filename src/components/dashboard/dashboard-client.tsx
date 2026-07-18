@@ -12,6 +12,7 @@ import {
   Clock,
   BarChart3,
   Trash2,
+  NotebookPen,
 } from "lucide-react";
 
 export type DeckSummary = {
@@ -72,6 +73,13 @@ export function DashboardClient({ decks }: { decks: DeckSummary[] }) {
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
           <DashboardBrandLogo />
           <div className="flex items-center gap-3">
+            <Link
+              href="/notebook"
+              className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-[var(--muted-strong)] transition hover:bg-[var(--panel-hover)] hover:text-[var(--ink-strong)]"
+            >
+              <NotebookPen className="h-4 w-4" />
+              Notebook
+            </Link>
             <Link
               href="/deck/new"
               className="flex items-center gap-2 rounded-lg bg-[var(--ink-strong)] px-4 py-2 text-sm font-medium text-[var(--page)] transition hover:opacity-90"
