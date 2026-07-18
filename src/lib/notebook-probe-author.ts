@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 const normalized = z.number().finite().min(0).max(1);
+const notebookCoordinate = z.number().finite().min(-0.25).max(1.55);
 
 export const notebookProbeRegionSchema = z.object({
   id: z.string().trim().min(1).max(80),
@@ -65,8 +66,8 @@ const labelActionSchema = z.object({
 const writeActionSchema = z.object({
   type: z.literal("write"),
   text: z.string().trim().min(1).max(280),
-  x: normalized,
-  y: normalized,
+  x: notebookCoordinate,
+  y: notebookCoordinate,
   color: inkColorSchema,
 }).strict();
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef } from "react";
-import { compressLegacySegments, createShapeId, Editor, Tldraw } from "@tldraw/tldraw";
+import { compressLegacySegments, createShapeId, Editor, Tldraw, type TLAssetId } from "@tldraw/tldraw";
 
 import "@tldraw/tldraw/tldraw.css";
 
@@ -11,6 +11,8 @@ import { CuePerformance } from "@/lib/notebook-probe-cue-performance";
 import type { ProbeGesture, ProbeRegion, TutorInkBeat, TutorInkPlan } from "./probe-types";
 
 type PageImage = { x: number; y: number; w: number; h: number };
+export type NotebookCanvasPage = { id: string; title: string; imageUrl: string; pageNumber: number };
+export type NotebookCanvasTool = "select" | "draw" | "eraser" | "hand";
 
 export type TldrawProbeCanvasHandle = {
   /** Arms a plan for externally supplied audio / transport cues. It does not start a clock. */
@@ -23,6 +25,8 @@ export type TldrawProbeCanvasHandle = {
   clearTutorInk: () => void;
   /** Legacy local-clock fallback for environments where Realtime is unavailable. */
   playTutorInk: (plan: TutorInkPlan) => void;
+  setTool: (tool: NotebookCanvasTool) => void;
+  zoomToPage: (pageId: string) => void;
 };
 
 export type TutorInkBeatTelemetry = {
@@ -34,25 +38,31 @@ export type TutorInkBeatTelemetry = {
 };
 
 type TldrawProbeCanvasProps = {
-  imageUrl: string;
-  imageKey: string;
+  imageUrl?: string;
+  imageKey?: string;
+  pages?: NotebookCanvasPage[];
+  activePageId?: string;
   regions: ProbeRegion[];
   selectedRegionId?: string;
-  onFocusGesture: (gesture: ProbeGesture) => void;
+  onFocusGesture?: (gesture: ProbeGesture) => void;
+  onActivePageChange?: (pageId: string) => void;
+  persistenceKey?: string;
   /** Transport-neutral instrumentation; callers can correlate this with audio events. */
   onTutorInkTelemetry?: (event: TutorInkBeatTelemetry) => void;
 };
 
-const IMAGE_SHAPE_ID = createShapeId("notebook-probe-image");
 const PAGE_ORIGIN = { x: 0, y: 0 };
+const PAGE_GAP = 420;
 
 export const TldrawProbeCanvas = forwardRef<TldrawProbeCanvasHandle, TldrawProbeCanvasProps>(function TldrawProbeCanvas(
-  { imageUrl, imageKey, regions, selectedRegionId, onFocusGesture, onTutorInkTelemetry },
+  { imageUrl, imageKey, pages, activePageId, regions, selectedRegionId, onFocusGesture, onActivePageChange, persistenceKey, onTutorInkTelemetry },
   ref,
 ) {
   const editorRef = useRef<Editor | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const imageRef = useRef<PageImage>({ x: 0, y: 0, w: 1200, h: 900 });
+  const pageImagesRef = useRef(new Map<string, PageImage>());
+  const activePageIdRef = useRef(activePageId ?? pages?.[0]?.id ?? "legacy-page");
   const gestureStartRef = useRef<{ pointerId: number; point: { x: number; y: number } } | null>(null);
   const regionsRef = useRef(regions);
   const planCancelRef = useRef<(() => void) | undefined>(undefined);
@@ -62,6 +72,10 @@ export const TldrawProbeCanvas = forwardRef<TldrawProbeCanvasHandle, TldrawProbe
   const imageRenderTokenRef = useRef(0);
 
   useEffect(() => { regionsRef.current = regions; }, [regions]);
+  useEffect(() => {
+    activePageIdRef.current = activePageId ?? pages?.[0]?.id ?? "legacy-page";
+    imageRef.current = pageImagesRef.current.get(activePageIdRef.current) ?? imageRef.current;
+  }, [activePageId, pages]);
   useEffect(() => { telemetryRef.current = onTutorInkTelemetry; }, [onTutorInkTelemetry]);
   useEffect(() => () => {
     planCancelRef.current?.();
@@ -190,43 +204,66 @@ export const TldrawProbeCanvas = forwardRef<TldrawProbeCanvasHandle, TldrawProbe
     cancelTutorInk,
     clearTutorInk,
     playTutorInk,
+    setTool: (tool) => editorRef.current?.setCurrentTool(tool),
+    zoomToPage: (pageId) => {
+      const editor = editorRef.current;
+      const page = pageImagesRef.current.get(pageId);
+      if (!editor || !page) return;
+      activePageIdRef.current = pageId;
+      imageRef.current = page;
+      editor.zoomToBounds(page, { animation: { duration: 220 }, inset: 88 });
+    },
   }), [beginTutorPerformance, renderTutorBeat, cancelTutorPerformance, cancelTutorInk, clearTutorInk, playTutorInk]);
 
   const renderImage = useCallback(async () => {
     const editor = editorRef.current;
     if (!editor) return;
     const renderToken = ++imageRenderTokenRef.current;
-    clearTutorInk();
     deleteByRole("vision-region");
-    const existing = editor.getShape(IMAGE_SHAPE_ID);
-    if (existing) editor.deleteShapes([IMAGE_SHAPE_ID]);
+    const pageShapes = editor.getCurrentPageShapes().filter((shape) => shape.meta?.notebookProbeRole === "page-image");
+    if (pageShapes.length) editor.deleteShapes(pageShapes.map((shape) => shape.id));
+    pageImagesRef.current.clear();
 
-    const dimensions = await imageDimensions(imageUrl);
-    if (renderToken !== imageRenderTokenRef.current || !editorRef.current) return;
-    const maxWidth = 1200;
-    const scale = Math.min(1, maxWidth / dimensions.w);
-    const image = { x: PAGE_ORIGIN.x, y: PAGE_ORIGIN.y, w: Math.round(dimensions.w * scale), h: Math.round(dimensions.h * scale) };
-    imageRef.current = image;
-    const assetId = `asset:notebook-probe-${Date.now()}`;
-    editor.createAssets([{
-      id: assetId,
-      typeName: "asset",
-      type: "image",
-      meta: { notebookProbeRole: "page-image" },
-      props: { name: imageKey, src: imageUrl, w: dimensions.w, h: dimensions.h, mimeType: imageUrl.startsWith("data:image/png") ? "image/png" : null, isAnimated: false },
-    }] as unknown as Parameters<Editor["createAssets"]>[0]);
-    editor.createShape({
-      id: IMAGE_SHAPE_ID,
-      type: "image",
-      x: image.x,
-      y: image.y,
-      isLocked: true,
-      meta: { notebookProbeRole: "page-image" },
-      props: { w: image.w, h: image.h, assetId, url: imageUrl, crop: null, flipX: false, flipY: false, playing: false, altText: `Loaded diagram: ${imageKey}` },
-    } as unknown as Parameters<Editor["createShape"]>[0]);
-    const bounds = editor.getShapePageBounds(IMAGE_SHAPE_ID);
-    if (bounds) editor.zoomToBounds(bounds, { animation: { duration: 220 }, inset: 72 });
-  }, [clearTutorInk, deleteByRole, imageKey, imageUrl]);
+    const sources: NotebookCanvasPage[] = pages?.length
+      ? pages
+      : imageUrl
+        ? [{ id: "legacy-page", title: imageKey ?? "Page", imageUrl, pageNumber: 1 }]
+        : [];
+    await Promise.allSettled(sources.map(async (page, index) => {
+      const size = await imageDimensions(page.imageUrl);
+      if (renderToken !== imageRenderTokenRef.current || !editorRef.current) return;
+      const scale = Math.min(1, 1100 / size.w);
+      const image = {
+        x: PAGE_ORIGIN.x + index * (1100 + PAGE_GAP),
+        y: PAGE_ORIGIN.y,
+        w: Math.round(size.w * scale),
+        h: Math.round(size.h * scale),
+      };
+      pageImagesRef.current.set(page.id, image);
+      const assetId = `asset:notebook-${page.id}` as TLAssetId;
+      editor.createAssets([{
+        id: assetId,
+        typeName: "asset",
+        type: "image",
+        meta: { notebookProbeRole: "page-image", notebookPageId: page.id },
+        props: { name: page.title, src: page.imageUrl, w: size.w, h: size.h, mimeType: page.imageUrl.startsWith("data:image/png") ? "image/png" : null, isAnimated: false },
+      }] as Parameters<Editor["createAssets"]>[0]);
+      editor.createShape({
+        id: createShapeId(`notebook-page-${page.id}`),
+        type: "image",
+        x: image.x,
+        y: image.y,
+        isLocked: true,
+        meta: { notebookProbeRole: "page-image", notebookPageId: page.id, pageNumber: page.pageNumber },
+        props: { w: image.w, h: image.h, assetId, url: page.imageUrl, crop: null, flipX: false, flipY: false, playing: false, altText: `${page.title}, page ${page.pageNumber}` },
+      } as Parameters<Editor["createShape"]>[0]);
+      if (page.id === activePageIdRef.current || (index === 0 && !pageImagesRef.current.has(activePageIdRef.current))) {
+        activePageIdRef.current = page.id;
+        imageRef.current = image;
+        editor.zoomToBounds(image, { animation: { duration: 220 }, inset: 72 });
+      }
+    }));
+  }, [deleteByRole, imageKey, imageUrl, pages]);
 
   const renderRegions = useCallback(() => {
     const editor = editorRef.current;
@@ -265,9 +302,20 @@ export const TldrawProbeCanvas = forwardRef<TldrawProbeCanvasHandle, TldrawProbe
 
   const onMount = useCallback((editor: Editor) => {
     editorRef.current = editor;
-    editor.setCurrentTool("hand");
+    editor.user.updateUserPreferences({ colorScheme: "dark" });
+    editor.setCurrentTool("select");
+    const cleanup = editor.store.listen(() => {
+      const selectedPage = editor.getSelectedShapes().find((shape) => typeof shape.meta?.notebookPageId === "string");
+      const pageId = selectedPage?.meta?.notebookPageId;
+      if (typeof pageId === "string" && pageId !== activePageIdRef.current && pageImagesRef.current.has(pageId)) {
+        activePageIdRef.current = pageId;
+        imageRef.current = pageImagesRef.current.get(pageId) ?? imageRef.current;
+        onActivePageChange?.(pageId);
+      }
+    }, { scope: "session" });
     void renderImage();
-  }, [renderImage]);
+    return cleanup;
+  }, [onActivePageChange, renderImage]);
 
   const toNormalized = useCallback((clientX: number, clientY: number) => {
     const editor = editorRef.current;
@@ -292,15 +340,14 @@ export const TldrawProbeCanvas = forwardRef<TldrawProbeCanvasHandle, TldrawProbe
     const end = toNormalized(event.clientX, event.clientY);
     if (!end) return;
     const minX = Math.min(start.point.x, end.x), minY = Math.min(start.point.y, end.y);
-    onFocusGesture({
+    onFocusGesture?.({
       points: [start.point, end],
       bounds: { x: minX, y: minY, w: Math.abs(end.x - start.point.x), h: Math.abs(end.y - start.point.y) },
     });
   }, [onFocusGesture, toNormalized]);
 
-  return <div ref={canvasRef} className="absolute inset-0 touch-none" onPointerDownCapture={pointerDown} onPointerUpCapture={pointerUp}>
-    <Tldraw hideUi onMount={onMount} licenseKey={process.env.NEXT_PUBLIC_TLDRAW_LICENSE_KEY} />
-    <div className="pointer-events-none absolute left-4 top-4 rounded-md border border-white/10 bg-[#111711]/88 px-3 py-2 text-xs text-[#d6e2d1] shadow-lg backdrop-blur"><span className="font-semibold text-[#c6ff67]">Pencil / mouse</span> focus · <span className="font-semibold text-[#c6ff67]">touch</span> pan + pinch</div>
+  return <div ref={canvasRef} className="absolute inset-0 touch-none" onPointerDownCapture={onFocusGesture ? pointerDown : undefined} onPointerUpCapture={onFocusGesture ? pointerUp : undefined}>
+    <Tldraw hideUi onMount={onMount} persistenceKey={persistenceKey} licenseKey={process.env.NEXT_PUBLIC_TLDRAW_LICENSE_KEY} />
   </div>;
 });
 

@@ -1,5 +1,5 @@
-import { NotebookProbeSurface } from "@/components/notebook-probe/notebook-probe-surface";
+import { redirect } from "next/navigation";
 
 export default function NotebookProbePage() {
-  return <NotebookProbeSurface />;
+  redirect("/notebook");
 }

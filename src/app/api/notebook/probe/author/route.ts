@@ -65,6 +65,8 @@ export async function POST(request: Request) {
                 "Create the smallest useful ordered ink plan that answers the student's question.",
                 "Use only provided region IDs. Never invent a target region or raw pixel coordinate.",
                 "Prefer one circle plus one concise label for a focused question; use more beats only when the learner asks to label or derive.",
+                "For a derivation or worked example, use write beats as sequential lines in the open notebook space to the right of the source (x from 1.08 to 1.5). Keep annotations on the source itself within x and y from 0 to 1.",
+                "When checking learner work, mark only the specific step supported by the supplied context; use red sparingly for a correction and green for a confirmed step.",
                 "The client deterministically resolves region IDs, label placement, stroke geometry, and collisions.",
                 "voiceCue describes what the realtime voice should say during that beat; narrationBrief summarizes the complete spoken response.",
                 "Keep the performance under eight seconds unless a multi-part explanation truly needs more time.",
