@@ -47,6 +47,13 @@ export class CuePerformance<TBeat extends { id: string }> {
     return { kind: "accepted", beat };
   }
 
+  /** Free a beat after an unfinished animation is discarded so resume can redraw it. */
+  release(planId: string, beatId: string) {
+    const active = this.active;
+    if (!active || active.id !== planId) return false;
+    return active.acceptedBeatIds.delete(beatId);
+  }
+
   cancel(planId?: string) {
     if (!this.active || (planId && this.active.id !== planId)) return false;
     this.active = undefined;

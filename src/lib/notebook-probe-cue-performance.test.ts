@@ -33,4 +33,12 @@ describe("CuePerformance", () => {
     expect(performance.begin({ id: "bad", beats: [{ id: "duplicate" }, { id: "duplicate" }] })).toBe(false);
     expect(performance.activePlanId).toBeUndefined();
   });
+
+  it("can release an unfinished beat so resume may redraw it", () => {
+    const performance = new CuePerformance<{ id: string; value: number }>();
+    performance.begin(plan);
+    expect(performance.claim("plan-a", "first")).toEqual({ kind: "accepted", beat: plan.beats[0] });
+    expect(performance.release("plan-a", "first")).toBe(true);
+    expect(performance.claim("plan-a", "first")).toEqual({ kind: "accepted", beat: plan.beats[0] });
+  });
 });

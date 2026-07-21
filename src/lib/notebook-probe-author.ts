@@ -31,8 +31,8 @@ export const notebookProbeAuthorRequestSchema = z.object({
   existingInkSummary: z.string().trim().max(2_000).optional(),
   /** True when the supplied image includes learner handwriting on the page. */
   hasLearnerInk: z.boolean().optional(),
-  /** explain = teach/derive; check_work = mark and correct the learner's attempt. */
-  intent: z.enum(["explain", "check_work"]).optional(),
+  /** explain = teach/derive; check_work = mark and correct; clarify = spoken answer, little/no new ink. */
+  intent: z.enum(["explain", "check_work", "clarify"]).optional(),
   pageNumber: z.number().int().positive().max(500).optional(),
   pageTitle: z.string().trim().max(200).optional(),
 }).strict().superRefine((value, context) => {
@@ -86,12 +86,18 @@ const underlineActionSchema = z.object({
   color: inkColorSchema,
 }).strict();
 
+/** Spoken reply with no canvas marks — used for clarifications and acknowledgements. */
+const speakActionSchema = z.object({
+  type: z.literal("speak"),
+}).strict();
+
 export const notebookProbeInkActionSchema = z.discriminatedUnion("type", [
   circleActionSchema,
   arrowActionSchema,
   labelActionSchema,
   writeActionSchema,
   underlineActionSchema,
+  speakActionSchema,
 ]);
 
 export const notebookProbeInkPlanSchema = z.object({
@@ -103,7 +109,7 @@ export const notebookProbeInkPlanSchema = z.object({
     durationMs: z.number().int().min(120).max(8_000),
     voiceCue: z.string().trim().min(1).max(240),
     action: notebookProbeInkActionSchema,
-  }).strict()).min(1).max(12),
+  }).strict()).min(1).max(8),
 }).strict().superRefine((plan, context) => {
   const beatIds = new Set<string>();
   for (const [index, beat] of plan.beats.entries()) {

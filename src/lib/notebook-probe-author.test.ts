@@ -15,6 +15,22 @@ const region = {
 };
 
 describe("notebook probe author schemas", () => {
+  it("bounds a complete realtime solution to eight beats", () => {
+    const result = notebookProbeInkPlanSchema.safeParse({
+      summary: "Short slice",
+      narrationBrief: "Only the next useful move.",
+      beats: Array.from({ length: 9 }, (_, index) => ({
+        id: `step-${index}`,
+        atMs: index * 300,
+        durationMs: 300,
+        voiceCue: "Start here.",
+        action: { type: "circle" as const, targetRegionId: region.id, color: "blue" as const },
+      })),
+    });
+
+    expect(result.success).toBe(false);
+  });
+
   it("accepts a bounded author request", () => {
     const result = notebookProbeAuthorRequestSchema.safeParse({
       imageDataUrl: "data:image/png;base64,AAAA",
@@ -37,6 +53,21 @@ describe("notebook probe author schemas", () => {
         durationMs: 500,
         voiceCue: "This step is where the sign flipped.",
         action: { type: "underline", x: 0.2, y: 0.55, width: 0.28, color: "red" },
+      }],
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts speak-only clarification beats", () => {
+    const result = notebookProbeInkPlanSchema.safeParse({
+      summary: "Answer aloud",
+      narrationBrief: "Explain the quotient without new writing.",
+      beats: [{
+        id: "speak-1",
+        atMs: 0,
+        durationMs: 600,
+        voiceCue: "We divide because both sides still have that factor.",
+        action: { type: "speak" },
       }],
     });
     expect(result.success).toBe(true);
