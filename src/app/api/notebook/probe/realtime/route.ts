@@ -38,15 +38,15 @@ export async function POST() {
           input: {
             turn_detection: {
               type: "semantic_vad",
-              eagerness: "auto",
-              interrupt_response: true,
-              create_response: true,
+              eagerness: "medium",
+              interrupt_response: false,
+              create_response: false,
             },
             transcription: { model: "gpt-4o-mini-transcribe" },
           },
           output: { voice: "marin" },
         },
-        max_output_tokens: 2_400,
+        max_output_tokens: 1_200,
       },
     });
 

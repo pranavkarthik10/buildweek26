@@ -6,19 +6,12 @@ import {
 } from "@/lib/notebook-probe-realtime";
 
 describe("notebook probe realtime instructions", () => {
-  it("keeps narration bound to Terra beats and interruption-safe", () => {
+  it("keeps the server realtime session transcription-only", () => {
     const instructions = buildNotebookProbeRealtimeInstructions();
 
-    expect(instructions).toContain("finish EVERY beat in the SAME turn");
-    expect(instructions).toContain("request_ink_plan");
-    expect(instructions).toContain("stage_ink_beat");
-    expect(instructions).toContain("Never stage several beats in advance");
-    expect(instructions).toContain("Only make visual claims");
-    expect(instructions).toContain("If the learner interrupts");
-    expect(instructions).toContain("check their work");
-    expect(instructions).toContain("Do not ask them to point first");
-    expect(instructions).toContain("do NOT re-derive the previous problem");
-    expect(instructions).not.toContain("diagram lesson");
+    expect(instructions).toContain("transcription-only");
+    expect(instructions).toContain("Never create an audio or text response");
+    expect(instructions).toContain("Never call tools");
   });
 
   it("uses a short-lived secret", () => {
