@@ -29,6 +29,12 @@ export const notebookProbeAuthorRequestSchema = z.object({
   regions: z.array(notebookProbeRegionSchema).max(40),
   focusedRegionIds: z.array(z.string().trim().min(1).max(80)).max(12).default([]),
   existingInkSummary: z.string().trim().max(2_000).optional(),
+  /** True when the supplied image includes learner handwriting on the page. */
+  hasLearnerInk: z.boolean().optional(),
+  /** explain = teach/derive; check_work = mark and correct the learner's attempt. */
+  intent: z.enum(["explain", "check_work"]).optional(),
+  pageNumber: z.number().int().positive().max(500).optional(),
+  pageTitle: z.string().trim().max(200).optional(),
 }).strict().superRefine((value, context) => {
   if (!/^data:image\/(png|jpeg|webp);base64,[a-z0-9+/=\s]+$/i.test(value.imageDataUrl)) {
     context.addIssue({
@@ -71,11 +77,21 @@ const writeActionSchema = z.object({
   color: inkColorSchema,
 }).strict();
 
+/** Horizontal underline under a learner step or formula, in page-normalized coords. */
+const underlineActionSchema = z.object({
+  type: z.literal("underline"),
+  x: notebookCoordinate,
+  y: notebookCoordinate,
+  width: z.number().finite().min(0.04).max(1.2),
+  color: inkColorSchema,
+}).strict();
+
 export const notebookProbeInkActionSchema = z.discriminatedUnion("type", [
   circleActionSchema,
   arrowActionSchema,
   labelActionSchema,
   writeActionSchema,
+  underlineActionSchema,
 ]);
 
 export const notebookProbeInkPlanSchema = z.object({

@@ -20,11 +20,14 @@ export type VisionProbeResult = {
   focusedRegionId: string | null;
 };
 
+export type TutorInkColor = "violet" | "red" | "blue" | "green" | "orange";
+
 export type TutorInkAction =
-  | { type: "circle"; targetRegionId: string; color: "violet" | "red" | "blue" | "green" | "orange" }
-  | { type: "arrow"; targetRegionId: string; placement: "north" | "east" | "south" | "west"; color: "violet" | "red" | "blue" | "green" | "orange" }
-  | { type: "label"; targetRegionId: string; text: string; placement: "north" | "east" | "south" | "west"; color: "violet" | "red" | "blue" | "green" | "orange" }
-  | { type: "write"; text: string; x: number; y: number; color: "violet" | "red" | "blue" | "green" | "orange" };
+  | { type: "circle"; targetRegionId: string; color: TutorInkColor }
+  | { type: "arrow"; targetRegionId: string; placement: "north" | "east" | "south" | "west"; color: TutorInkColor }
+  | { type: "label"; targetRegionId: string; text: string; placement: "north" | "east" | "south" | "west"; color: TutorInkColor }
+  | { type: "write"; text: string; x: number; y: number; color: TutorInkColor }
+  | { type: "underline"; x: number; y: number; width: number; color: TutorInkColor };
 
 export type TutorInkBeat = { id: string; atMs: number; durationMs: number; voiceCue: string; action: TutorInkAction };
 

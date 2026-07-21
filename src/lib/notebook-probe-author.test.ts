@@ -21,6 +21,23 @@ describe("notebook probe author schemas", () => {
       question: "What does this do?",
       regions: [region],
       focusedRegionIds: [region.id],
+      hasLearnerInk: true,
+      intent: "check_work",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts underline correction beats", () => {
+    const result = notebookProbeInkPlanSchema.safeParse({
+      summary: "Mark the arithmetic slip.",
+      narrationBrief: "The derivative setup is right, but this multiplication is off.",
+      beats: [{
+        id: "underline-step",
+        atMs: 0,
+        durationMs: 500,
+        voiceCue: "This step is where the sign flipped.",
+        action: { type: "underline", x: 0.2, y: 0.55, width: 0.28, color: "red" },
+      }],
     });
     expect(result.success).toBe(true);
   });
