@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   buildRealtimePerformanceInstructions,
   compactTutorInkPlanForRealtime,
+  isContinueRequest,
+  isLearnerTakingATurn,
 } from "./use-realtime-performance";
 
 describe("realtime performance protocol", () => {
@@ -32,11 +34,23 @@ describe("realtime performance protocol", () => {
     });
   });
 
-  it("requires plan creation and a sequential cue tool before narration", () => {
+  it("requires finishing every beat in one turn and handoff on learner turn", () => {
     const instructions = buildRealtimePerformanceInstructions("Base rules");
 
-    expect(instructions).toContain("request_ink_plan first");
-    expect(instructions).toContain("Immediately before speaking every beat's voiceCue");
-    expect(instructions).toContain("Do not call tools in parallel");
+    expect(instructions).toContain("perform every beat");
+    expect(instructions).toContain("nextBeatId until isFinal");
+    expect(instructions).toContain("status handoff");
+    expect(instructions).toContain("request_ink_plan");
+  });
+
+  it("detects continue vs learner-taking-a-turn phrasing", () => {
+    expect(isContinueRequest("continue")).toBe(true);
+    expect(isContinueRequest("next step")).toBe(true);
+    expect(isContinueRequest("keep going")).toBe(true);
+    expect(isLearnerTakingATurn("I'll try the next one")).toBe(true);
+    expect(isLearnerTakingATurn("let me try g")).toBe(true);
+    expect(isLearnerTakingATurn("my turn")).toBe(true);
+    expect(isContinueRequest("I'll try the next")).toBe(false);
+    expect(isLearnerTakingATurn("check my work")).toBe(false);
   });
 });

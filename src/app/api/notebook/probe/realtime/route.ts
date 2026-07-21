@@ -46,7 +46,7 @@ export async function POST() {
           },
           output: { voice: "marin" },
         },
-        max_output_tokens: 500,
+        max_output_tokens: 2_400,
       },
     });
 
