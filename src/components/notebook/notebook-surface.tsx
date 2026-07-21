@@ -8,6 +8,7 @@ import {
   ChevronRight,
   Eraser,
   Hand,
+  Highlighter,
   Mic,
   MicOff,
   MousePointer2,
@@ -20,20 +21,31 @@ import {
 import { useCallback, useMemo, useRef, useState } from "react";
 
 import type { LectureDeck } from "@/lib/aiprof-types";
+import { describeTutorInkHistory, placeContinuationBelowExistingInk, sanitizeTutorInkPlan } from "@/lib/notebook-ink-layout";
+import { authorIntentForTurn, type TutorTurnIntent } from "@/lib/notebook-tutor-intent";
 import type { TutorInkPlan, ProbeRegion } from "@/components/notebook-probe/probe-types";
 import {
   TldrawProbeCanvas,
   type NotebookCanvasPage,
+  type NotebookPenStyle,
   type NotebookCanvasTool,
   type TldrawProbeCanvasHandle,
 } from "@/components/notebook-probe/tldraw-probe-canvas";
 import {
   useRealtimePerformance,
+  type CreateTutorPlanOptions,
   type RealtimeTranscriptEvent,
 } from "@/components/notebook-probe/use-realtime-performance";
 
 type PageMap = { imageDataUrl: string; regions: ProbeRegion[]; focusedRegionId?: string };
-type AuthorIntent = "explain" | "check_work";
+type AuthorIntent = "explain" | "check_work" | "clarify";
+
+type TutorBoardMemory = {
+  focusPageId?: string;
+  phase: "idle" | "teaching" | "paused";
+  inkHistory: TutorInkPlan[];
+  segment: TutorInkPlan | null;
+};
 
 export function NotebookSurface({
   decks,
@@ -52,13 +64,14 @@ export function NotebookSurface({
   })), [deck]);
   const [activePageId, setActivePageId] = useState(pages[0]?.id ?? "");
   const [tool, setToolState] = useState<NotebookCanvasTool>("select");
+  const [penStyle, setPenStyleState] = useState<NotebookPenStyle>({ color: "blue", size: "m" });
   const [error, setError] = useState("");
   const [deckMenuOpen, setDeckMenuOpen] = useState(false);
   const canvasRef = useRef<TldrawProbeCanvasHandle | null>(null);
   const pageMapsRef = useRef(new Map<string, PageMap>());
   const [regionsByPage, setRegionsByPage] = useState<Record<string, ProbeRegion[]>>({});
   const mapPromisesRef = useRef(new Map<string, Promise<PageMap>>());
-  const activePlanRef = useRef<TutorInkPlan | null>(null);
+  const boardRef = useRef<TutorBoardMemory>({ phase: "idle", inkHistory: [], segment: null });
   const activePage = pages.find((page) => page.id === activePageId) ?? pages[0];
   const activeRegions = activePage ? regionsByPage[activePage.id] ?? [] : [];
 
@@ -92,7 +105,7 @@ export function NotebookSurface({
       };
       // Cache the base page map (not composite overrides) so later turns stay fast.
       if (!imageOverride) {
-        pageMapsRef.current.set(page.id, result);
+        pageMapsRef.current.set(page.id, { ...result, focusedRegionId: undefined });
         setRegionsByPage((current) => ({ ...current, [page.id]: regions }));
       }
       return result;
@@ -103,7 +116,7 @@ export function NotebookSurface({
     return mapping;
   }, []);
 
-  const authorPlan = useCallback(async (question: string) => {
+  const authorPlan = useCallback(async (question: string, options: CreateTutorPlanOptions) => {
     const canvasPageId = canvasRef.current?.getActivePageId();
     const page =
       (canvasPageId ? pages.find((candidate) => candidate.id === canvasPageId) : undefined)
@@ -111,18 +124,36 @@ export function NotebookSurface({
     if (!page) throw new Error("Upload a PDF before starting a session.");
     if (page.id !== activePageId) setActivePageId(page.id);
 
-    const composite = await Promise.race([
-      canvasRef.current?.exportActivePageComposite().catch(() => null) ?? Promise.resolve(null),
-      new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 2_500)),
-    ]);
-    const hasLearnerInk = Boolean(composite?.hasLearnerInk ?? canvasRef.current?.hasLearnerInk());
-    const intent = detectAuthorIntent(question, hasLearnerInk);
+    const turnIntent: TutorTurnIntent = options.intent;
+    const preserveInk = options.preserveInk;
+    const board = boardRef.current;
+    const hasTutorInk = board.inkHistory.length > 0 || Boolean(board.segment);
+    const hasLearnerInkHint = Boolean(canvasRef.current?.hasLearnerInk());
+    const lightTurn = turnIntent === "clarify" || turnIntent === "ack";
+    // Skip expensive page exports on spoken clarifications; reuse cached page map.
+    const composite = !lightTurn && (hasLearnerInkHint || preserveInk)
+      ? await Promise.race([
+        canvasRef.current?.exportActivePageComposite({ includeTutorInk: preserveInk }).catch(() => null) ?? Promise.resolve(null),
+        new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 2_500)),
+      ])
+      : null;
+    const hasLearnerInk = Boolean(composite?.hasLearnerInk ?? hasLearnerInkHint);
+    const intent = authorIntentForTurn(turnIntent) === "check_work" || (!lightTurn && detectAuthorIntent(question, hasLearnerInk) === "check_work")
+      ? "check_work"
+      : authorIntentForTurn(turnIntent) === "clarify"
+        ? "clarify"
+        : "explain";
 
     // Prefer a compact snapshot of the visible page (with learner marks when present).
     let groundImage: string | undefined;
     try {
-      groundImage = await compactImage(composite?.imageDataUrl ?? page.imageUrl);
-      groundImage = normalizeImageDataUrl(groundImage);
+      if (lightTurn) {
+        const cached = pageMapsRef.current.get(page.id);
+        groundImage = cached?.imageDataUrl ?? await compactImage(page.imageUrl).then(normalizeImageDataUrl);
+      } else {
+        groundImage = await compactImage(composite?.imageDataUrl ?? page.imageUrl);
+        groundImage = normalizeImageDataUrl(groundImage);
+      }
     } catch {
       groundImage = undefined;
     }
@@ -130,12 +161,12 @@ export function NotebookSurface({
     // Use cached regions when possible. Only re-scan when the learner marked the page.
     let pageMap: PageMap | null = null;
     try {
-      pageMap = await ensurePageMap(page);
+      pageMap = await ensurePageMap(page, question);
     } catch {
       pageMap = pageMapsRef.current.get(page.id) ?? null;
     }
 
-    if (hasLearnerInk && groundImage) {
+    if (!lightTurn && hasLearnerInk && groundImage) {
       try {
         const marked = await ensurePageMap(
           page,
@@ -163,13 +194,24 @@ export function NotebookSurface({
       pageMap = { ...pageMap, imageDataUrl: groundImage };
     }
 
-    const inkSummary = hasLearnerInk
-      ? `The learner marked the page with ${composite?.learnerStrokeCount ?? "some"} strokes (arrows or writing). Treat those marks as the focus of their question.`
-      : `Page ${page.pageNumber}: ${page.title}. No learner marks yet.`;
+    const historyForLayout = preserveInk || hasTutorInk ? board.inkHistory : [];
+    const priorTutorWork = historyForLayout.length ? describeTutorInkHistory(historyForLayout) : "";
+    const inkSummary = [
+      hasLearnerInk
+        ? `The learner marked the page with ${composite?.learnerStrokeCount ?? "some"} strokes (arrows or writing). Treat those marks as the focus of their question.`
+        : `Page ${page.pageNumber}: ${page.title}. No learner marks yet.`,
+      priorTutorWork
+        ? `Existing tutor ink already on the board: ${priorTutorWork}. APPEND only — do not restart, re-circle, or rewrite earlier lines.`
+        : "No existing tutor ink. You may circle the focus problem, then write the solution.",
+      turnIntent === "followup" ? "This is a write-continuation. Add the next useful solution lines only." : "",
+      turnIntent === "clarify" ? "This is a clarifying question about work already shown. Answer with speak beats only — do not write new lines." : "",
+      turnIntent === "check_work" ? "Check the learner's work: underline mistakes and write corrections nearby." : "",
+    ].filter(Boolean).join(" ");
 
     const contextualQuestion = [
       `The learner is looking at page ${page.pageNumber} (${page.title}).`,
       hasLearnerInk ? "They already pointed or drew on the page. Answer the marked problem; do not ask them to point again." : "",
+      `Turn intent: ${turnIntent}.`,
       `Learner said: ${question}`,
     ].filter(Boolean).join(" ");
 
@@ -179,8 +221,8 @@ export function NotebookSurface({
       intent,
       pageNumber: page.pageNumber,
       pageTitle: page.title,
-    });
-    if (!authored && pageMap.regions.length === 0) {
+    }, options.signal);
+    if (!authored && !lightTurn && pageMap.regions.length === 0) {
       // One retry with a fresh page scan if we had no regions at all.
       try {
         pageMap = await ensurePageMap(page, "Map the problems and formulas on this page.", true);
@@ -191,14 +233,31 @@ export function NotebookSurface({
           intent,
           pageNumber: page.pageNumber,
           pageTitle: page.title,
-        });
+        }, options.signal);
       } catch {
         // Fall through to a local fallback.
       }
     }
 
-    const plan = authored ?? createGroundedFallbackPlan(question, pageMap, intent, page);
-    if (!plan) {
+    let plan = authored ?? (lightTurn
+      ? {
+        id: crypto.randomUUID(),
+        summary: "Clarify aloud",
+        narrationBrief: "Answer the learner's question without new ink.",
+        beats: [{
+          id: "clarify-1",
+          atMs: 0,
+          durationMs: 900,
+          voiceCue: "That step just rewrites the previous line more simply.",
+          action: { type: "speak" as const },
+        }],
+      }
+      : createGroundedFallbackPlan(question, pageMap, intent === "check_work" ? "check_work" : "explain", page));
+    if (plan && intent !== "clarify") {
+      plan = sanitizeTutorInkPlan(placeContinuationBelowExistingInk(plan, historyForLayout));
+    } else if (plan) {
+      plan = sanitizeTutorInkPlan(plan);
+    }    if (!plan) {
       // Last resort: still teach from open space even with no regions.
       const emergency: TutorInkPlan = {
         id: crypto.randomUUID(),
@@ -214,29 +273,55 @@ export function NotebookSurface({
           },
         ],
       };
-      canvasRef.current?.clearTutorInk();
-      if (!canvasRef.current?.beginTutorPerformance(emergency)) throw new Error("The notebook is not ready yet.");
-      activePlanRef.current = emergency;
-      return emergency;
+      return sanitizeTutorInkPlan(emergency);
     }
 
-    canvasRef.current?.clearTutorInk();
-    if (!canvasRef.current?.beginTutorPerformance(plan)) throw new Error("The notebook is not ready yet.");
-    activePlanRef.current = plan;
     return plan;
   }, [activePage, activePageId, ensurePageMap, pages]);
 
   const realtime = useRealtimePerformance({
     createPlan: authorPlan,
-    onBeatCue: (planId, beatId, cueTimestamp) => {
-      canvasRef.current?.renderTutorBeat(planId, beatId, cueTimestamp);
+    hasTutorInk: () => boardRef.current.inkHistory.length > 0 || Boolean(boardRef.current.segment),
+    hasLearnerInk: () => Boolean(canvasRef.current?.hasLearnerInk()),
+    onPlanActivated: (plan, { preserveInk }) => {
+      const canvas = canvasRef.current;
+      const board = boardRef.current;
+      const samePlan = board.segment?.id === plan.id;
+      const addsVisibleInk = plan.beats.some((beat) => beat.action.type !== "speak");
+      if (!preserveInk) {
+        canvas?.clearTutorInk();
+        canvas?.beginTutorPerformance(plan);
+        board.inkHistory = addsVisibleInk ? [plan] : [];
+      } else if (!samePlan) {
+        canvas?.beginTutorPerformance(plan);
+        if (addsVisibleInk && !board.inkHistory.some((candidate) => candidate.id === plan.id)) {
+          board.inkHistory = [...board.inkHistory, plan];
+        }
+      }
+      board.segment = plan;
+      board.phase = "teaching";
+      board.focusPageId = activePageId;
     },
-    onInterrupted: ({ planId }) => canvasRef.current?.cancelTutorPerformance(planId),
+    onBeatCue: (planId, beatId, cueTimestamp, plan) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return false;
+      if (canvas.renderTutorBeat(planId, beatId, cueTimestamp)) return true;
+      if (!canvas.beginTutorPerformance(plan)) return false;
+      return canvas.renderTutorBeat(planId, beatId, cueTimestamp);
+    },
+    onInterrupted: ({ planId }) => {
+      boardRef.current.phase = "paused";
+      // Keep finished beat claims so resume can talk through remaining lines without redrawing them.
+      canvasRef.current?.cancelTutorPerformance(planId, { preserveClaims: true });
+    },
     onTranscript: (event: RealtimeTranscriptEvent) => {
       if (event.direction === "learner" && event.final) setError("");
     },
     onState: (state) => {
       if (state.error) setError(state.error);
+      if (state.status === "ready" && boardRef.current.phase === "teaching") {
+        boardRef.current.phase = "idle";
+      }
     },
   });
 
@@ -244,7 +329,7 @@ export function NotebookSurface({
     const nextDeck = decks.find((candidate) => candidate.deckId === nextDeckId);
     if (!nextDeck) return;
     realtime.disconnect();
-    activePlanRef.current = null;
+    boardRef.current = { phase: "idle", inkHistory: [], segment: null };
     setDeckId(nextDeckId);
     setActivePageId(nextDeck.slides[0]?.id ?? "");
     setDeckMenuOpen(false);
@@ -268,6 +353,11 @@ export function NotebookSurface({
     canvasRef.current?.setTool(nextTool);
   }, []);
 
+  const setPenStyle = useCallback((nextStyle: NotebookPenStyle) => {
+    setPenStyleState(nextStyle);
+    canvasRef.current?.setPenStyle(nextStyle);
+  }, []);
+
   const startSession = useCallback(async () => {
     if (!activePage) return;
     setError("");
@@ -281,7 +371,8 @@ export function NotebookSurface({
   const pauseSession = useCallback(() => {
     realtime.interrupt();
     realtime.disconnect();
-    canvasRef.current?.cancelTutorPerformance(activePlanRef.current?.id);
+    canvasRef.current?.cancelTutorPerformance(boardRef.current.segment?.id);
+    boardRef.current.phase = "idle";
   }, [realtime]);
 
   const activeIndex = Math.max(0, pages.findIndex((page) => page.id === activePage?.id));
@@ -379,11 +470,15 @@ export function NotebookSurface({
 
         {pages.length ? (
           <div className="pointer-events-none absolute inset-x-0 bottom-3 z-30 flex items-end justify-between gap-3 px-3 sm:px-5">
-            <div className="pointer-events-auto flex items-center gap-0.5 rounded-lg border border-white/[0.08] bg-[#171717] p-1 shadow-[0_6px_8px_rgba(0,0,0,0.28)]" aria-label="Canvas tools">
+            <div className="pointer-events-auto relative flex items-center gap-0.5 rounded-lg border border-white/[0.08] bg-[#171717] p-1 shadow-[0_6px_8px_rgba(0,0,0,0.28)]" aria-label="Canvas tools">
               <ToolButton label="Select" active={tool === "select"} onClick={() => setTool("select")}><MousePointer2 className="size-4" /></ToolButton>
               <ToolButton label="Draw" active={tool === "draw"} onClick={() => setTool("draw")}><Pencil className="size-4" /></ToolButton>
+              <ToolButton label="Highlight" active={tool === "highlight"} onClick={() => setTool("highlight")}><Highlighter className="size-4" /></ToolButton>
               <ToolButton label="Erase" active={tool === "eraser"} onClick={() => setTool("eraser")}><Eraser className="size-4" /></ToolButton>
               <ToolButton label="Pan" active={tool === "hand"} onClick={() => setTool("hand")}><Hand className="size-4" /></ToolButton>
+              {tool === "draw" || tool === "highlight" ? (
+                <PenPalette style={penStyle} onChange={setPenStyle} />
+              ) : null}
             </div>
 
             <nav className="pointer-events-auto flex min-w-0 items-center gap-1 rounded-lg border border-white/[0.08] bg-[#171717] p-1 shadow-[0_6px_8px_rgba(0,0,0,0.28)]" aria-label="Notebook pages">
@@ -400,6 +495,50 @@ export function NotebookSurface({
 
 function ToolButton({ label, active, onClick, children }: { label: string; active: boolean; onClick: () => void; children: React.ReactNode }) {
   return <button type="button" aria-label={label} aria-pressed={active} title={label} onClick={onClick} className={`grid size-8 place-items-center rounded-md transition ${active ? "bg-white text-[#111]" : "text-white/45 hover:bg-white/[0.06] hover:text-white/80"}`}>{children}</button>;
+}
+
+const PEN_COLORS: Array<{ color: NotebookPenStyle["color"]; swatch: string; label: string }> = [
+  { color: "black", swatch: "#202124", label: "Graphite" },
+  { color: "blue", swatch: "#2563eb", label: "Blue" },
+  { color: "red", swatch: "#e5484d", label: "Red" },
+  { color: "green", swatch: "#2f9e44", label: "Green" },
+  { color: "violet", swatch: "#7950f2", label: "Violet" },
+  { color: "yellow", swatch: "#f5c542", label: "Yellow" },
+];
+
+function PenPalette({ style, onChange }: { style: NotebookPenStyle; onChange: (style: NotebookPenStyle) => void }) {
+  return (
+    <div className="absolute bottom-11 left-0 flex items-center gap-1 rounded-lg border border-white/10 bg-[#171717] p-1.5 shadow-[0_6px_8px_rgba(0,0,0,0.28)] sm:static sm:ml-1 sm:rounded-none sm:border-0 sm:border-l sm:border-white/10 sm:bg-transparent sm:p-0 sm:pl-2 sm:shadow-none" aria-label="Pen options">
+      {PEN_COLORS.map(({ color, swatch, label }) => (
+        <button
+          key={color}
+          type="button"
+          title={label}
+          aria-label={`${label} ink`}
+          aria-pressed={style.color === color}
+          onClick={() => onChange({ ...style, color })}
+          className={`grid size-7 place-items-center rounded-md transition hover:bg-white/[0.08] ${style.color === color ? "bg-white/[0.1]" : ""}`}
+        >
+          <span className={`rounded-full ${style.color === color ? "size-4 ring-2 ring-white ring-offset-1 ring-offset-[#171717]" : "size-3.5"}`} style={{ backgroundColor: swatch }} />
+        </button>
+      ))}
+      <div className="ml-1 flex items-center gap-0.5 border-l border-white/10 pl-1.5">
+        {(["s", "m", "l"] as const).map((size, index) => (
+          <button
+            key={size}
+            type="button"
+            title={["Fine", "Medium", "Bold"][index]}
+            aria-label={`${["Fine", "Medium", "Bold"][index]} stroke`}
+            aria-pressed={style.size === size}
+            onClick={() => onChange({ ...style, size })}
+            className={`grid size-7 place-items-center rounded-md transition hover:bg-white/[0.08] ${style.size === size ? "bg-white text-[#111]" : "text-white/55"}`}
+          >
+            <span className="rounded-full bg-current" style={{ width: 4 + index * 3, height: 4 + index * 3 }} />
+          </button>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function sessionStatusLabel(status: string, connected: boolean) {
@@ -456,10 +595,12 @@ async function requestAuthoredPlan(
     pageNumber?: number;
     pageTitle?: string;
   },
+  signal?: AbortSignal,
 ) {
   const response = await fetch("/api/notebook/probe/author", {
     method: "POST",
     headers: { "content-type": "application/json" },
+    signal,
     body: JSON.stringify({
       imageDataUrl: pageMap.imageDataUrl,
       question,

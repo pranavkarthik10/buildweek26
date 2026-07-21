@@ -7,7 +7,7 @@ import { Aperture, LoaderCircle, Play, RefreshCw, Upload } from "lucide-react";
 import type { ProbeGesture, ProbeRegion, TutorInkPlan } from "./probe-types";
 import { RealtimePerformanceControls, type RealtimePerformanceState as ControlsState } from "./realtime-performance-controls";
 import type { TldrawProbeCanvasHandle, TutorInkBeatTelemetry } from "./tldraw-probe-canvas";
-import { useRealtimePerformance, type RealtimeTranscriptEvent } from "./use-realtime-performance";
+import { useRealtimePerformance, type CreateTutorPlanOptions, type RealtimeTranscriptEvent } from "./use-realtime-performance";
 
 const NotebookProbeCanvas = dynamic(
   () => import("./tldraw-probe-canvas").then((module) => module.TldrawProbeCanvas),
@@ -54,7 +54,7 @@ export function NotebookProbeSurface() {
   const [currentBeat, setCurrentBeat] = useState(0);
   const [totalBeats, setTotalBeats] = useState(0);
 
-  const authorPlan = useCallback(async (spokenQuestion: string) => {
+  const authorPlan = useCallback(async (spokenQuestion: string, options: CreateTutorPlanOptions) => {
     if (!regions.length) throw new Error("The diagram is still being mapped. Try again when its regions appear.");
     setQuestion(spokenQuestion);
     setNotice("Thinking about the clearest way to show that…");
@@ -62,6 +62,7 @@ export function NotebookProbeSurface() {
     const response = await fetch("/api/notebook/probe/author", {
       method: "POST",
       headers: { "content-type": "application/json" },
+      signal: options.signal,
       body: JSON.stringify({
         imageDataUrl: exactImageDataUrl,
         question: spokenQuestion,
@@ -74,25 +75,24 @@ export function NotebookProbeSurface() {
     if (!response.ok) throw new Error("I couldn’t prepare that explanation");
     const plan = isTutorInkPlan(payload.plan, payload.planId) ? payload.plan : null;
     if (!plan) throw new Error("I couldn’t prepare that explanation");
-    const canvas = canvasRef.current;
-    if (!canvas) throw new Error("The notebook canvas is not ready yet");
-    canvas.clearTutorInk();
-    if (!canvas.beginTutorPerformance(plan)) throw new Error("I couldn’t prepare that explanation");
-    activePlanRef.current = plan;
-    setCurrentBeat(0);
-    setTotalBeats(plan.beats.length);
-    setNotice("I’ve got it. Watch the page as I explain.");
     return plan;
   }, [imageDataUrl, imageUrl, probeImageDataUrl, regions, selectedRegion]);
 
-  const onBeatCue = useCallback((planId: string, beatId: string, cueTimestamp: number) => {
+  const onBeatCue = useCallback((planId: string, beatId: string, cueTimestamp: number, resumedPlan: TutorInkPlan) => {
     const plan = activePlanRef.current;
-    if (!plan || plan.id !== planId) return;
+    if (!plan || plan.id !== planId) return false;
     const beatIndex = plan.beats.findIndex((beat) => beat.id === beatId);
-    if (beatIndex < 0) return;
-    canvasRef.current?.renderTutorBeat(planId, beatId, cueTimestamp);
+    if (beatIndex < 0) return false;
+    const canvas = canvasRef.current;
+    if (!canvas) return false;
+    let rendered = canvas.renderTutorBeat(planId, beatId, cueTimestamp);
+    if (!rendered && canvas.beginTutorPerformance(resumedPlan)) {
+      rendered = canvas.renderTutorBeat(planId, beatId, cueTimestamp);
+    }
+    if (!rendered) return false;
     setCurrentBeat(beatIndex + 1);
     setNotice(plan.beats[beatIndex].voiceCue);
+    return true;
   }, []);
 
   const onTranscript = useCallback((event: RealtimeTranscriptEvent) => {
@@ -103,10 +103,21 @@ export function NotebookProbeSurface() {
 
   const realtime = useRealtimePerformance({
     createPlan: authorPlan,
+    hasTutorInk: () => Boolean(activePlanRef.current),
+    hasLearnerInk: () => false,
+    onPlanActivated: (plan, { preserveInk }) => {
+      const canvas = canvasRef.current;
+      if (!preserveInk) canvas?.clearTutorInk();
+      canvas?.beginTutorPerformance(plan);
+      activePlanRef.current = plan;
+      setCurrentBeat(0);
+      setTotalBeats(plan.beats.length);
+      setNotice("I’ve got it. Watch the page as I explain.");
+    },
     onBeatCue,
     onInterrupted: ({ planId }) => {
-      canvasRef.current?.cancelTutorPerformance(planId);
-      setNotice("Interrupted—the voice and unfinished mark stopped together. Ask a follow-up whenever you’re ready.");
+      canvasRef.current?.cancelTutorPerformance(planId, { preserveClaims: true });
+      setNotice("Interrupted—ask a follow-up whenever you’re ready.");
     },
     onTranscript,
   });
@@ -172,7 +183,11 @@ export function NotebookProbeSurface() {
     }
     setNotice("Thinking about the clearest way to show that…");
     try {
-      const plan = await authorPlan(question);
+      const plan = await authorPlan(question, {
+        signal: new AbortController().signal,
+        intent: "explain",
+        preserveInk: false,
+      });
       try {
         await realtime.startPlan(plan);
       } catch (voiceError) {
@@ -295,7 +310,7 @@ function isTutorInkPlan(value: unknown, planId: unknown): value is TutorInkPlan 
   const valid = typeof plan.summary === "string" && typeof plan.narrationBrief === "string" && Array.isArray(plan.beats) && plan.beats.every((beat) => {
     if (!beat || typeof beat.action !== "object" || !beat.action) return false;
     const action = beat.action as { type?: unknown };
-    return typeof beat.id === "string" && typeof beat.atMs === "number" && typeof beat.durationMs === "number" && typeof beat.voiceCue === "string" && ["circle", "arrow", "label", "write"].includes(typeof action.type === "string" ? action.type : "");
+    return typeof beat.id === "string" && typeof beat.atMs === "number" && typeof beat.durationMs === "number" && typeof beat.voiceCue === "string" && ["circle", "arrow", "label", "write", "underline", "speak"].includes(typeof action.type === "string" ? action.type : "");
   });
   if (valid) Object.assign(plan, { id: planId });
   return valid;

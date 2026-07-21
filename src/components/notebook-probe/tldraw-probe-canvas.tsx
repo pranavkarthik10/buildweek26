@@ -20,7 +20,11 @@ import type { ProbeGesture, ProbeRegion, TutorInkBeat, TutorInkPlan } from "./pr
 
 type PageImage = { x: number; y: number; w: number; h: number };
 export type NotebookCanvasPage = { id: string; title: string; imageUrl: string; pageNumber: number };
-export type NotebookCanvasTool = "select" | "draw" | "eraser" | "hand";
+export type NotebookCanvasTool = "select" | "draw" | "highlight" | "eraser" | "hand";
+export type NotebookPenStyle = {
+  color: "black" | "blue" | "red" | "green" | "violet" | "yellow";
+  size: "s" | "m" | "l" | "xl";
+};
 
 export type ActivePageComposite = {
   imageDataUrl: string;
@@ -35,17 +39,18 @@ export type TldrawProbeCanvasHandle = {
   /** Appends one authored beat exactly once. Repeated, stale, and unknown cues are ignored safely. */
   renderTutorBeat: (planId: string, beatId: string, cueAtMs?: number) => boolean;
   /** Stops unfinished traces while keeping all completed tutor ink on the page. */
-  cancelTutorPerformance: (planId?: string) => boolean;
+  cancelTutorPerformance: (planId?: string, options?: { preserveClaims?: boolean }) => boolean;
   cancelTutorInk: () => void;
   clearTutorInk: () => void;
   /** Legacy local-clock fallback for environments where Realtime is unavailable. */
   playTutorInk: (plan: TutorInkPlan) => void;
   setTool: (tool: NotebookCanvasTool) => void;
+  setPenStyle: (style: NotebookPenStyle) => void;
   zoomToPage: (pageId: string) => void;
   /** Page currently centered in the viewport (updated while panning). */
   getActivePageId: () => string | undefined;
   /** Page image plus learner ink (excludes tutor marks and vision overlays). */
-  exportActivePageComposite: () => Promise<ActivePageComposite | null>;
+  exportActivePageComposite: (options?: { includeTutorInk?: boolean }) => Promise<ActivePageComposite | null>;
   hasLearnerInk: () => boolean;
 };
 
@@ -93,6 +98,7 @@ export const TldrawProbeCanvas = forwardRef<TldrawProbeCanvasHandle, TldrawProbe
   const imageRenderTokenRef = useRef(0);
   const onActivePageChangeRef = useRef(onActivePageChange);
   const hasFittedCameraRef = useRef(false);
+  const penStyleRef = useRef<NotebookPenStyle>({ color: "blue", size: "m" });
 
   useEffect(() => { regionsRef.current = regions; }, [regions]);
   useEffect(() => { onActivePageChangeRef.current = onActivePageChange; }, [onActivePageChange]);
@@ -118,17 +124,19 @@ export const TldrawProbeCanvas = forwardRef<TldrawProbeCanvasHandle, TldrawProbe
       if (planId && animation.planId !== planId) continue;
       animation.cancel();
       activeAnimationsRef.current.delete(key);
+      const beatId = key.split(":")[1];
+      if (planId && beatId) cuePerformanceRef.current.release(planId, beatId);
     }
   }, []);
 
-  const cancelTutorPerformance = useCallback((planId?: string) => {
+  const cancelTutorPerformance = useCallback((planId?: string, options?: { preserveClaims?: boolean }) => {
     const activePlanId = cuePerformanceRef.current.activePlanId;
     if (planId && activePlanId !== planId) return false;
     if (!activePlanId) return false;
     planCancelRef.current?.();
     planCancelRef.current = undefined;
-    cuePerformanceRef.current.cancel(activePlanId);
     cancelActiveAnimations(activePlanId);
+    if (!options?.preserveClaims) cuePerformanceRef.current.cancel(activePlanId);
     return true;
   }, [cancelActiveAnimations]);
 
@@ -173,19 +181,19 @@ export const TldrawProbeCanvas = forwardRef<TldrawProbeCanvasHandle, TldrawProbe
 
   const hasLearnerInk = useCallback(() => collectActivePageShapes(false).learnerStrokeCount > 0, [collectActivePageShapes]);
 
-  const applyLearnerPenStyle = useCallback((editor: Editor) => {
+  const applyLearnerPenStyle = useCallback((editor: Editor, style = penStyleRef.current) => {
     // White PDF pages need a real dark/blue stroke. Dark-scheme "black" reads as gray.
     editor.user.updateUserPreferences({ colorScheme: "light" });
-    editor.setStyleForNextShapes(DefaultColorStyle, "blue");
-    editor.setStyleForNextShapes(DefaultSizeStyle, "m");
+    editor.setStyleForNextShapes(DefaultColorStyle, style.color);
+    editor.setStyleForNextShapes(DefaultSizeStyle, style.size);
   }, []);
 
-  const exportActivePageComposite = useCallback(async (): Promise<ActivePageComposite | null> => {
+  const exportActivePageComposite = useCallback(async (options?: { includeTutorInk?: boolean }): Promise<ActivePageComposite | null> => {
     const editor = editorRef.current;
     const page = imageRef.current;
     const pageId = activePageIdRef.current;
     if (!editor) return null;
-    const { shapes, learnerStrokeCount } = collectActivePageShapes(false);
+    const { shapes, learnerStrokeCount } = collectActivePageShapes(Boolean(options?.includeTutorInk));
     if (!shapes.length) return null;
     try {
       const exported = await editor.toImageDataUrl(shapes, {
@@ -211,7 +219,12 @@ export const TldrawProbeCanvas = forwardRef<TldrawProbeCanvasHandle, TldrawProbe
     if (!editor || ("targetRegionId" in action && !region)) return false;
     const image = imageRef.current;
     const box = region?.box;
-    if (!box && action.type !== "write" && action.type !== "underline") return false;
+    if (!box && action.type !== "write" && action.type !== "underline" && action.type !== "speak") return false;
+    if (action.type === "speak") {
+      emitTelemetry({ planId, beatId: beat.id, kind: "first-paint", cueToPaintMs: Math.max(0, performance.now() - cueAtMs) });
+      emitTelemetry({ planId, beatId: beat.id, kind: "completed", cueToPaintMs: Math.max(0, performance.now() - cueAtMs) });
+      return true;
+    }
     const resolvedBox = box ?? { x: 0, y: 0, width: 0, height: 0 };
     const x = image.x + resolvedBox.x * image.w;
     const y = image.y + resolvedBox.y * image.h;
@@ -311,7 +324,12 @@ export const TldrawProbeCanvas = forwardRef<TldrawProbeCanvasHandle, TldrawProbe
       const editor = editorRef.current;
       if (!editor) return;
       editor.setCurrentTool(tool);
-      if (tool === "draw") applyLearnerPenStyle(editor);
+      if (tool === "draw" || tool === "highlight") applyLearnerPenStyle(editor);
+    },
+    setPenStyle: (style) => {
+      penStyleRef.current = style;
+      const editor = editorRef.current;
+      if (editor) applyLearnerPenStyle(editor, style);
     },
     zoomToPage: (pageId) => {
       const editor = editorRef.current;
