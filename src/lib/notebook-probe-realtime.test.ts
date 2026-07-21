@@ -15,6 +15,9 @@ describe("notebook probe realtime instructions", () => {
     expect(instructions).toContain("Never stage several beats in advance");
     expect(instructions).toContain("Only make visual claims");
     expect(instructions).toContain("If the learner interrupts");
+    expect(instructions).toContain("check their work");
+    expect(instructions).toContain("Do not ask them to point first");
+    expect(instructions).not.toContain("diagram lesson");
   });
 
   it("uses a short-lived secret", () => {
