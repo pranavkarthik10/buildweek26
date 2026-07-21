@@ -78,7 +78,7 @@ export default function NewDeckPage() {
     }
   }
 
-  async function handleSaveDeck() {
+  async function handleSaveDeck(destination: "session" | "notebook" = "session") {
     if (!lectureDeck || !selectedFile) return;
     setSaving(true);
     setSaveError("");
@@ -104,6 +104,11 @@ export default function NewDeckPage() {
       }
 
       const deck = await res.json();
+      if (destination === "notebook") {
+        window.location.href = `/notebook?deck=${encodeURIComponent(deck.id)}`;
+        return;
+      }
+
       // Create a session and redirect
       const sessionRes = await fetch("/api/sessions", {
         method: "POST",
@@ -256,11 +261,18 @@ export default function NewDeckPage() {
             />
             <div className="flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
               <button
-                onClick={handleSaveDeck}
+                onClick={() => void handleSaveDeck("notebook")}
                 disabled={saving}
                 className="w-full rounded-lg bg-[var(--ink-strong)] px-8 py-3 text-sm font-medium text-[var(--page)] transition hover:opacity-90 disabled:opacity-50 sm:w-auto"
               >
-                {saving ? "Saving..." : "Save & start session"}
+                {saving ? "Saving..." : "Open in notebook"}
+              </button>
+              <button
+                onClick={() => void handleSaveDeck("session")}
+                disabled={saving}
+                className="w-full rounded-lg border border-[var(--line-strong)] bg-[var(--paper)] px-8 py-3 text-sm font-medium text-[var(--ink-strong)] transition hover:bg-[var(--panel-hover)] disabled:opacity-50 sm:w-auto"
+              >
+                {saving ? "Saving..." : "Save & start lecture"}
               </button>
               <button
                 onClick={() => {

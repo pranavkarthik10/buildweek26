@@ -26,7 +26,7 @@ export async function POST(request: Request) {
     console.error("[studydeck] notebook probe route failed", {
       error: error instanceof Error ? error.message : "unknown error",
     });
-    return errorResponse(500, "vision_unavailable", "The vision probe is temporarily unavailable.");
+    return errorResponse(500, "vision_unavailable", "Page reading is temporarily unavailable.");
   }
 }
 

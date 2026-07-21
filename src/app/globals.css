@@ -159,3 +159,12 @@ textarea {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Hide tldraw production license watermark for the hackathon demo surface. */
+.studydeck-notebook-canvas .tl-watermark_SEE-LICENSE,
+.studydeck-canvas .tl-watermark_SEE-LICENSE,
+[data-testid="tl-watermark-unlicensed"],
+[data-testid="tl-watermark-licensed"] {
+  display: none !important;
+  pointer-events: none !important;
+}
