@@ -1,7 +1,15 @@
 "use client";
 
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef } from "react";
-import { compressLegacySegments, createShapeId, Editor, Tldraw, type TLAssetId } from "@tldraw/tldraw";
+import {
+  compressLegacySegments,
+  createShapeId,
+  DefaultColorStyle,
+  DefaultSizeStyle,
+  Editor,
+  Tldraw,
+  type TLAssetId,
+} from "@tldraw/tldraw";
 
 import "@tldraw/tldraw/tldraw.css";
 
@@ -13,6 +21,13 @@ import type { ProbeGesture, ProbeRegion, TutorInkBeat, TutorInkPlan } from "./pr
 type PageImage = { x: number; y: number; w: number; h: number };
 export type NotebookCanvasPage = { id: string; title: string; imageUrl: string; pageNumber: number };
 export type NotebookCanvasTool = "select" | "draw" | "eraser" | "hand";
+
+export type ActivePageComposite = {
+  imageDataUrl: string;
+  hasLearnerInk: boolean;
+  learnerStrokeCount: number;
+  pageId: string;
+};
 
 export type TldrawProbeCanvasHandle = {
   /** Arms a plan for externally supplied audio / transport cues. It does not start a clock. */
@@ -27,6 +42,11 @@ export type TldrawProbeCanvasHandle = {
   playTutorInk: (plan: TutorInkPlan) => void;
   setTool: (tool: NotebookCanvasTool) => void;
   zoomToPage: (pageId: string) => void;
+  /** Page currently centered in the viewport (updated while panning). */
+  getActivePageId: () => string | undefined;
+  /** Page image plus learner ink (excludes tutor marks and vision overlays). */
+  exportActivePageComposite: () => Promise<ActivePageComposite | null>;
+  hasLearnerInk: () => boolean;
 };
 
 export type TutorInkBeatTelemetry = {
@@ -53,6 +73,7 @@ type TldrawProbeCanvasProps = {
 
 const PAGE_ORIGIN = { x: 0, y: 0 };
 const PAGE_GAP = 420;
+const LEARNER_INK_PADDING = 48;
 
 export const TldrawProbeCanvas = forwardRef<TldrawProbeCanvasHandle, TldrawProbeCanvasProps>(function TldrawProbeCanvas(
   { imageUrl, imageKey, pages, activePageId, regions, selectedRegionId, onFocusGesture, onActivePageChange, persistenceKey, onTutorInkTelemetry },
@@ -70,8 +91,11 @@ export const TldrawProbeCanvas = forwardRef<TldrawProbeCanvasHandle, TldrawProbe
   const activeAnimationsRef = useRef(new Map<string, ActiveInkAnimation>());
   const telemetryRef = useRef(onTutorInkTelemetry);
   const imageRenderTokenRef = useRef(0);
+  const onActivePageChangeRef = useRef(onActivePageChange);
+  const hasFittedCameraRef = useRef(false);
 
   useEffect(() => { regionsRef.current = regions; }, [regions]);
+  useEffect(() => { onActivePageChangeRef.current = onActivePageChange; }, [onActivePageChange]);
   useEffect(() => {
     activePageIdRef.current = activePageId ?? pages?.[0]?.id ?? "legacy-page";
     imageRef.current = pageImagesRef.current.get(activePageIdRef.current) ?? imageRef.current;
@@ -120,6 +144,66 @@ export const TldrawProbeCanvas = forwardRef<TldrawProbeCanvasHandle, TldrawProbe
 
   const emitTelemetry = useCallback((event: TutorInkBeatTelemetry) => telemetryRef.current?.(event), []);
 
+  const collectActivePageShapes = useCallback((includeTutorInk: boolean) => {
+    const editor = editorRef.current;
+    const page = imageRef.current;
+    const pageId = activePageIdRef.current;
+    if (!editor) return { shapes: [], learnerStrokeCount: 0 };
+    const bounds = {
+      x: page.x - LEARNER_INK_PADDING,
+      y: page.y - LEARNER_INK_PADDING,
+      w: page.w + LEARNER_INK_PADDING * 2,
+      h: page.h + LEARNER_INK_PADDING * 2 + page.h * 0.35,
+    };
+    let learnerStrokeCount = 0;
+    const shapes = editor.getCurrentPageShapes().filter((shape) => {
+      const role = shape.meta?.notebookProbeRole;
+      if (role === "vision-region") return false;
+      if (role === "tutor-ink") return includeTutorInk;
+      if (role === "page-image") return shape.meta?.notebookPageId === pageId;
+      if (!shapeIntersectsBounds(shape, bounds)) return false;
+      if (shape.type === "draw" || shape.type === "text" || shape.type === "geo" || shape.type === "arrow" || shape.type === "highlight" || shape.type === "line") {
+        learnerStrokeCount += 1;
+        return true;
+      }
+      return false;
+    });
+    return { shapes, learnerStrokeCount };
+  }, []);
+
+  const hasLearnerInk = useCallback(() => collectActivePageShapes(false).learnerStrokeCount > 0, [collectActivePageShapes]);
+
+  const applyLearnerPenStyle = useCallback((editor: Editor) => {
+    // White PDF pages need a real dark/blue stroke. Dark-scheme "black" reads as gray.
+    editor.user.updateUserPreferences({ colorScheme: "light" });
+    editor.setStyleForNextShapes(DefaultColorStyle, "blue");
+    editor.setStyleForNextShapes(DefaultSizeStyle, "m");
+  }, []);
+
+  const exportActivePageComposite = useCallback(async (): Promise<ActivePageComposite | null> => {
+    const editor = editorRef.current;
+    const page = imageRef.current;
+    const pageId = activePageIdRef.current;
+    if (!editor) return null;
+    const { shapes, learnerStrokeCount } = collectActivePageShapes(false);
+    if (!shapes.length) return null;
+    try {
+      const exported = await editor.toImageDataUrl(shapes, {
+        format: "jpeg",
+        quality: 0.82,
+        scale: Math.min(1, 1280 / Math.max(page.w, page.h)),
+        background: true,
+        padding: 12,
+      } as Parameters<Editor["toImageDataUrl"]>[1]);
+      const imageDataUrl = typeof exported === "string" ? exported : exported?.url;
+      if (!imageDataUrl || typeof imageDataUrl !== "string") return null;
+      if (imageDataUrl.length > 6_400_000) return null;
+      return { imageDataUrl, hasLearnerInk: learnerStrokeCount > 0, learnerStrokeCount, pageId };
+    } catch {
+      return null;
+    }
+  }, [collectActivePageShapes]);
+
   const drawBeat = useCallback((planId: string, beat: TutorInkBeat, cueAtMs: number) => {
     const editor = editorRef.current;
     const action = beat.action;
@@ -127,7 +211,7 @@ export const TldrawProbeCanvas = forwardRef<TldrawProbeCanvasHandle, TldrawProbe
     if (!editor || ("targetRegionId" in action && !region)) return false;
     const image = imageRef.current;
     const box = region?.box;
-    if (!box && action.type !== "write") return false;
+    if (!box && action.type !== "write" && action.type !== "underline") return false;
     const resolvedBox = box ?? { x: 0, y: 0, width: 0, height: 0 };
     const x = image.x + resolvedBox.x * image.w;
     const y = image.y + resolvedBox.y * image.h;
@@ -141,33 +225,52 @@ export const TldrawProbeCanvas = forwardRef<TldrawProbeCanvasHandle, TldrawProbe
         const angle = -Math.PI / 2 + (index / 36) * Math.PI * 2;
         return { x: x + w / 2 + Math.cos(angle) * (w / 2 + pad), y: y + h / 2 + Math.sin(angle) * (h / 2 + pad) };
       });
-      startTracedBeat({ editor, planId, beat, cueAtMs, points, color, activeAnimations: activeAnimationsRef.current, emitTelemetry });
+      startTracedBeat({ editor, planId, beat, cueAtMs, strokes: [points], color, activeAnimations: activeAnimationsRef.current, emitTelemetry });
       return true;
     }
 
     if (action.type === "arrow") {
       const start = { x: x + w / 2, y: y + h / 2 };
       const end = labelPointForPlacement(image, resolvedBox, action.placement);
-      startTracedBeat({ editor, planId, beat, cueAtMs, points: [start, end], color, activeAnimations: activeAnimationsRef.current, emitTelemetry });
+      startTracedBeat({ editor, planId, beat, cueAtMs, strokes: [[start, end]], color, activeAnimations: activeAnimationsRef.current, emitTelemetry });
+      return true;
+    }
+
+    if (action.type === "underline") {
+      const start = { x: image.x + action.x * image.w, y: image.y + action.y * image.h };
+      const end = { x: start.x + action.width * image.w, y: start.y + Math.min(10, image.h * 0.01) };
+      const mid = { x: (start.x + end.x) / 2, y: start.y + 4 };
+      startTracedBeat({
+        editor,
+        planId,
+        beat,
+        cueAtMs,
+        strokes: [[start, mid, end]],
+        color,
+        activeAnimations: activeAnimationsRef.current,
+        emitTelemetry,
+        size: "l",
+      });
       return true;
     }
 
     const labelPoint = action.type === "write"
       ? { x: image.x + action.x * image.w, y: image.y + action.y * image.h }
       : labelPointForPlacement(image, resolvedBox, action.placement);
-    const text = action.type === "write" ? action.text : action.text;
-    editor.createShape({
-      id: createShapeId(`tutor-${beat.id}-${Date.now()}`),
-      type: "text",
-      x: labelPoint.x,
-      y: labelPoint.y,
-      isLocked: true,
-      meta: { notebookProbeRole: "tutor-ink" },
-      props: { richText: richText(text), color, size: "l", font: "draw", autoSize: true },
-    } as Parameters<Editor["createShape"]>[0]);
-    const elapsedMs = Math.max(0, performance.now() - cueAtMs);
-    emitTelemetry({ planId, beatId: beat.id, kind: "first-paint", cueToPaintMs: elapsedMs });
-    emitTelemetry({ planId, beatId: beat.id, kind: "completed", cueToPaintMs: elapsedMs });
+    const text = action.text;
+    const durationMs = Math.max(beat.durationMs, Math.min(2_800, 220 + text.length * 55));
+    startHandwrittenTextBeat({
+      editor,
+      planId,
+      beat: { ...beat, durationMs },
+      cueAtMs,
+      origin: labelPoint,
+      text,
+      color,
+      activeAnimations: activeAnimationsRef.current,
+      emitTelemetry,
+      size: action.type === "write" ? "l" : "m",
+    });
     return true;
   }, [emitTelemetry]);
 
@@ -204,7 +307,12 @@ export const TldrawProbeCanvas = forwardRef<TldrawProbeCanvasHandle, TldrawProbe
     cancelTutorInk,
     clearTutorInk,
     playTutorInk,
-    setTool: (tool) => editorRef.current?.setCurrentTool(tool),
+    setTool: (tool) => {
+      const editor = editorRef.current;
+      if (!editor) return;
+      editor.setCurrentTool(tool);
+      if (tool === "draw") applyLearnerPenStyle(editor);
+    },
     zoomToPage: (pageId) => {
       const editor = editorRef.current;
       const page = pageImagesRef.current.get(pageId);
@@ -212,13 +320,19 @@ export const TldrawProbeCanvas = forwardRef<TldrawProbeCanvasHandle, TldrawProbe
       activePageIdRef.current = pageId;
       imageRef.current = page;
       editor.zoomToBounds(page, { animation: { duration: 220 }, inset: 88 });
+      hasFittedCameraRef.current = true;
     },
-  }), [beginTutorPerformance, renderTutorBeat, cancelTutorPerformance, cancelTutorInk, clearTutorInk, playTutorInk]);
+    getActivePageId: () => activePageIdRef.current,
+    exportActivePageComposite,
+    hasLearnerInk,
+  }), [beginTutorPerformance, renderTutorBeat, cancelTutorPerformance, cancelTutorInk, clearTutorInk, playTutorInk, exportActivePageComposite, hasLearnerInk, applyLearnerPenStyle]);
 
   const renderImage = useCallback(async () => {
     const editor = editorRef.current;
     if (!editor) return;
     const renderToken = ++imageRenderTokenRef.current;
+    const preserveCamera = hasFittedCameraRef.current;
+    const cameraBefore = preserveCamera ? editor.getCamera() : null;
     deleteByRole("vision-region");
     const pageShapes = editor.getCurrentPageShapes().filter((shape) => shape.meta?.notebookProbeRole === "page-image");
     if (pageShapes.length) editor.deleteShapes(pageShapes.map((shape) => shape.id));
@@ -229,6 +343,7 @@ export const TldrawProbeCanvas = forwardRef<TldrawProbeCanvasHandle, TldrawProbe
       : imageUrl
         ? [{ id: "legacy-page", title: imageKey ?? "Page", imageUrl, pageNumber: 1 }]
         : [];
+
     await Promise.allSettled(sources.map(async (page, index) => {
       const size = await imageDimensions(page.imageUrl);
       if (renderToken !== imageRenderTokenRef.current || !editorRef.current) return;
@@ -257,12 +372,27 @@ export const TldrawProbeCanvas = forwardRef<TldrawProbeCanvasHandle, TldrawProbe
         meta: { notebookProbeRole: "page-image", notebookPageId: page.id, pageNumber: page.pageNumber },
         props: { w: image.w, h: image.h, assetId, url: page.imageUrl, crop: null, flipX: false, flipY: false, playing: false, altText: `${page.title}, page ${page.pageNumber}` },
       } as Parameters<Editor["createShape"]>[0]);
-      if (page.id === activePageIdRef.current || (index === 0 && !pageImagesRef.current.has(activePageIdRef.current))) {
-        activePageIdRef.current = page.id;
-        imageRef.current = image;
-        editor.zoomToBounds(image, { animation: { duration: 220 }, inset: 72 });
-      }
     }));
+
+    if (renderToken !== imageRenderTokenRef.current || !editorRef.current) return;
+
+    const activeId = activePageIdRef.current;
+    const activeImage = pageImagesRef.current.get(activeId) ?? pageImagesRef.current.values().next().value;
+    if (activeImage) {
+      imageRef.current = activeImage;
+      if (!pageImagesRef.current.has(activeId)) {
+        // Keep whatever page id we already had if the map missed it; do not force page 1.
+        const first = [...pageImagesRef.current.entries()][0];
+        if (first) activePageIdRef.current = first[0];
+      }
+    }
+
+    if (preserveCamera && cameraBefore) {
+      editor.setCamera(cameraBefore);
+    } else if (activeImage) {
+      editor.zoomToBounds(activeImage, { animation: { duration: 220 }, inset: 72 });
+      hasFittedCameraRef.current = true;
+    }
   }, [deleteByRole, imageKey, imageUrl, pages]);
 
   const renderRegions = useCallback(() => {
@@ -302,20 +432,64 @@ export const TldrawProbeCanvas = forwardRef<TldrawProbeCanvasHandle, TldrawProbe
 
   const onMount = useCallback((editor: Editor) => {
     editorRef.current = editor;
-    editor.user.updateUserPreferences({ colorScheme: "dark" });
+    applyLearnerPenStyle(editor);
     editor.setCurrentTool("select");
-    const cleanup = editor.store.listen(() => {
+    hasFittedCameraRef.current = false;
+
+    const syncActivePageFromViewport = () => {
+      const viewport = editor.getViewportPageBounds();
+      if (!viewport || pageImagesRef.current.size === 0) return;
+      const centerX = viewport.x + viewport.w / 2;
+      const centerY = viewport.y + viewport.h / 2;
+      let bestId = activePageIdRef.current;
+      let bestScore = -1;
+      for (const [pageId, page] of pageImagesRef.current) {
+        const overlapW = Math.max(0, Math.min(page.x + page.w, viewport.x + viewport.w) - Math.max(page.x, viewport.x));
+        const overlapH = Math.max(0, Math.min(page.y + page.h, viewport.y + viewport.h) - Math.max(page.y, viewport.y));
+        const area = overlapW * overlapH;
+        const containsCenter =
+          centerX >= page.x && centerX <= page.x + page.w &&
+          centerY >= page.y && centerY <= page.y + page.h;
+        const score = area + (containsCenter ? page.w * page.h : 0);
+        if (score > bestScore) {
+          bestScore = score;
+          bestId = pageId;
+        }
+      }
+      if (bestScore <= 0 || bestId === activePageIdRef.current) return;
+      activePageIdRef.current = bestId;
+      imageRef.current = pageImagesRef.current.get(bestId) ?? imageRef.current;
+      onActivePageChangeRef.current?.(bestId);
+    };
+
+    let viewportFrame = 0;
+    const scheduleViewportSync = () => {
+      if (viewportFrame) return;
+      viewportFrame = window.requestAnimationFrame(() => {
+        viewportFrame = 0;
+        syncActivePageFromViewport();
+      });
+    };
+
+    const cleanupSelection = editor.store.listen(() => {
       const selectedPage = editor.getSelectedShapes().find((shape) => typeof shape.meta?.notebookPageId === "string");
       const pageId = selectedPage?.meta?.notebookPageId;
       if (typeof pageId === "string" && pageId !== activePageIdRef.current && pageImagesRef.current.has(pageId)) {
         activePageIdRef.current = pageId;
         imageRef.current = pageImagesRef.current.get(pageId) ?? imageRef.current;
-        onActivePageChange?.(pageId);
+        onActivePageChangeRef.current?.(pageId);
       }
     }, { scope: "session" });
-    void renderImage();
-    return cleanup;
-  }, [onActivePageChange, renderImage]);
+
+    const cleanupCamera = editor.store.listen(scheduleViewportSync, { scope: "session" });
+    void renderImage().then(() => syncActivePageFromViewport());
+
+    return () => {
+      cleanupSelection();
+      cleanupCamera();
+      if (viewportFrame) window.cancelAnimationFrame(viewportFrame);
+    };
+  }, [applyLearnerPenStyle, renderImage]);
 
   const toNormalized = useCallback((clientX: number, clientY: number) => {
     const editor = editorRef.current;
@@ -346,14 +520,10 @@ export const TldrawProbeCanvas = forwardRef<TldrawProbeCanvasHandle, TldrawProbe
     });
   }, [onFocusGesture, toNormalized]);
 
-  return <div ref={canvasRef} className="absolute inset-0 touch-none" onPointerDownCapture={onFocusGesture ? pointerDown : undefined} onPointerUpCapture={onFocusGesture ? pointerUp : undefined}>
+  return <div ref={canvasRef} className="absolute inset-0 touch-none studydeck-notebook-canvas" onPointerDownCapture={onFocusGesture ? pointerDown : undefined} onPointerUpCapture={onFocusGesture ? pointerUp : undefined}>
     <Tldraw hideUi onMount={onMount} persistenceKey={persistenceKey} licenseKey={process.env.NEXT_PUBLIC_TLDRAW_LICENSE_KEY} />
   </div>;
 });
-
-function richText(text: string) {
-  return { type: "doc" as const, content: [{ type: "paragraph" as const, content: [{ type: "text" as const, text }] }] };
-}
 
 function labelPointForPlacement(image: PageImage, box: ProbeRegion["box"], placement: "north" | "east" | "south" | "west") {
   const x = image.x + box.x * image.w;
@@ -361,13 +531,14 @@ function labelPointForPlacement(image: PageImage, box: ProbeRegion["box"], place
   const w = box.width * image.w;
   const h = box.height * image.h;
   const gap = 44;
-  if (placement === "north") return { x: x + w / 2, y: Math.max(image.y + 12, y - gap) };
-  if (placement === "south") return { x: x + w / 2, y: Math.min(image.y + image.h - 22, y + h + gap) };
-  if (placement === "west") return { x: Math.max(image.x + 12, x - gap), y: y + h / 2 };
-  return { x: Math.min(image.x + image.w - 160, x + w + gap), y: y + h / 2 };
+  if (placement === "north") return { x: x + w / 2 - 40, y: Math.max(image.y + 12, y - gap) };
+  if (placement === "south") return { x: x + w / 2 - 40, y: Math.min(image.y + image.h - 22, y + h + gap) };
+  if (placement === "west") return { x: Math.max(image.x + 12, x - gap - 80), y: y + h / 2 - 12 };
+  return { x: Math.min(image.x + image.w - 160, x + w + gap), y: y + h / 2 - 12 };
 }
 
 type InkColor = "violet" | "red" | "blue" | "green" | "orange";
+type InkStroke = Array<{ x: number; y: number }>;
 
 type ActiveInkAnimation = {
   planId: string;
@@ -379,18 +550,33 @@ type StartTracedBeatOptions = {
   planId: string;
   beat: TutorInkBeat;
   cueAtMs: number;
-  points: Array<{ x: number; y: number }>;
+  strokes: InkStroke[];
   color: InkColor;
   activeAnimations: Map<string, ActiveInkAnimation>;
   emitTelemetry: (event: TutorInkBeatTelemetry) => void;
+  size?: "s" | "m" | "l";
 };
 
-function startTracedBeat({ editor, planId, beat, cueAtMs, points, color, activeAnimations, emitTelemetry }: StartTracedBeatOptions) {
+type StartHandwrittenTextOptions = {
+  editor: Editor;
+  planId: string;
+  beat: TutorInkBeat;
+  cueAtMs: number;
+  origin: { x: number; y: number };
+  text: string;
+  color: InkColor;
+  activeAnimations: Map<string, ActiveInkAnimation>;
+  emitTelemetry: (event: TutorInkBeatTelemetry) => void;
+  size?: "s" | "m" | "l";
+};
+
+function startTracedBeat({ editor, planId, beat, cueAtMs, strokes, color, activeAnimations, emitTelemetry, size = "l" }: StartTracedBeatOptions) {
   const key = `${planId}:${beat.id}`;
-  const cancel = traceStroke(editor, points, color, beat.durationMs, {
+  const cancel = traceStrokes(editor, strokes, color, beat.durationMs, {
     planId,
     beatId: beat.id,
     cueAtMs,
+    size,
     onFirstPaint: (cueToPaintMs) => emitTelemetry({ planId, beatId: beat.id, kind: "first-paint", cueToPaintMs }),
     onComplete: (cueToPaintMs) => {
       activeAnimations.delete(key);
@@ -401,30 +587,133 @@ function startTracedBeat({ editor, planId, beat, cueAtMs, points, color, activeA
 }
 
 /**
- * Animate a tldraw draw shape by replacing its freehand segment every frame.
- * Cancelling removes only this unfinished trace: previous, completed tutor ink
- * remains in the document for an interruption or plan replacement.
+ * Legible tldraw draw-font text that reveals character-by-character so it feels handwritten.
  */
-function traceStroke(
+function startHandwrittenTextBeat({
+  editor,
+  planId,
+  beat,
+  cueAtMs,
+  origin,
+  text,
+  color,
+  activeAnimations,
+  emitTelemetry,
+  size = "l",
+}: StartHandwrittenTextOptions) {
+  const key = `${planId}:${beat.id}`;
+  const id = createShapeId(`write-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
+  const full = text.trim();
+  if (!full) return;
+
+  editor.createShape({
+    id,
+    type: "text",
+    x: origin.x,
+    y: origin.y,
+    isLocked: false,
+    meta: { notebookProbeRole: "tutor-ink", planId, beatId: beat.id },
+    props: {
+      richText: richText(full.slice(0, 1)),
+      color,
+      size,
+      font: "draw",
+      autoSize: true,
+      scale: 1,
+    },
+  } as Parameters<Editor["createShape"]>[0]);
+
+  const startedAt = performance.now();
+  let frameId: number | undefined;
+  let cancelled = false;
+  let firstPainted = false;
+  let completed = false;
+  const durationMs = Math.max(180, beat.durationMs);
+
+  const frame = (now: number) => {
+    if (cancelled) return;
+    if (!firstPainted) {
+      firstPainted = true;
+      emitTelemetry({ planId, beatId: beat.id, kind: "first-paint", cueToPaintMs: Math.max(0, now - cueAtMs) });
+    }
+    const progress = Math.min(1, (now - startedAt) / durationMs);
+    const count = Math.max(1, Math.ceil(progress * full.length));
+    editor.updateShape({
+      id,
+      type: "text",
+      isLocked: progress >= 1,
+      props: { richText: richText(full.slice(0, count)) },
+    } as unknown as Parameters<Editor["updateShape"]>[0]);
+    if (progress < 1) {
+      frameId = window.requestAnimationFrame(frame);
+    } else {
+      completed = true;
+      activeAnimations.delete(key);
+      emitTelemetry({ planId, beatId: beat.id, kind: "completed", cueToPaintMs: Math.max(0, now - cueAtMs) });
+    }
+  };
+  frameId = window.requestAnimationFrame(frame);
+
+  activeAnimations.set(key, {
+    planId,
+    cancel: () => {
+      if (cancelled || completed) return;
+      cancelled = true;
+      if (frameId !== undefined) window.cancelAnimationFrame(frameId);
+      if (editor.getShape(id)) editor.deleteShapes([id]);
+      activeAnimations.delete(key);
+    },
+  });
+}
+
+function richText(text: string) {
+  return {
+    type: "doc" as const,
+    content: [{ type: "paragraph" as const, content: text ? [{ type: "text" as const, text }] : [] }],
+  };
+}
+
+/**
+ * Animate one or more freehand strokes as a single tutor-ink draw shape.
+ * Cancelling removes only this unfinished trace.
+ */
+function traceStrokes(
   editor: Editor,
-  pagePoints: Array<{ x: number; y: number }>,
+  strokes: InkStroke[],
   color: InkColor,
   durationMs: number,
   lifecycle: {
     planId: string;
     beatId: string;
     cueAtMs: number;
+    size: "s" | "m" | "l";
     onFirstPaint: (cueToPaintMs: number) => void;
     onComplete: (cueToPaintMs: number) => void;
   },
 ) {
-  if (pagePoints.length < 2) return () => {};
+  const usable = strokes.filter((stroke) => stroke.length >= 2);
+  if (!usable.length) return () => {};
+
+  const origin = usable[0][0];
+  const totalPoints = usable.reduce((sum, stroke) => sum + stroke.length, 0);
   const id = createShapeId(`trace-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
-  const origin = pagePoints[0];
-  const toSegment = (count: number) => compressLegacySegments([{
-    type: "free" as const,
-    points: pagePoints.slice(0, Math.max(2, count)).map((point) => ({ x: point.x - origin.x, y: point.y - origin.y, z: 0.5 })),
-  }]);
+
+  const toSegments = (revealedPoints: number) => {
+    let remaining = Math.max(2, revealedPoints);
+    const segments = [];
+    for (const stroke of usable) {
+      if (remaining <= 0) break;
+      const count = Math.min(stroke.length, Math.max(remaining >= 2 || segments.length === 0 ? 2 : 0, remaining));
+      if (count < 2) break;
+      segments.push({
+        type: "free" as const,
+        points: stroke.slice(0, count).map((point) => ({ x: point.x - origin.x, y: point.y - origin.y, z: 0.5 })),
+      });
+      remaining -= count;
+    }
+    return compressLegacySegments(segments);
+  };
+
   editor.createShape({
     id,
     type: "draw",
@@ -432,8 +721,9 @@ function traceStroke(
     y: origin.y,
     isLocked: false,
     meta: { notebookProbeRole: "tutor-ink", planId: lifecycle.planId, beatId: lifecycle.beatId },
-    props: { segments: toSegment(2), color, size: "l", isComplete: false },
+    props: { segments: toSegments(2), color, size: lifecycle.size, isComplete: false },
   } as unknown as Parameters<Editor["createShape"]>[0]);
+
   const startedAt = performance.now();
   let frameId: number | undefined;
   let cancelled = false;
@@ -445,9 +735,14 @@ function traceStroke(
       firstPainted = true;
       lifecycle.onFirstPaint(Math.max(0, now - lifecycle.cueAtMs));
     }
-    const progress = Math.min(1, (now - startedAt) / Math.max(120, durationMs));
-    const count = Math.max(2, Math.ceil(progress * pagePoints.length));
-    editor.updateShape({ id, type: "draw", isLocked: progress >= 1, props: { segments: toSegment(count), isComplete: progress >= 1 } } as unknown as Parameters<Editor["updateShape"]>[0]);
+    const progress = Math.min(1, (now - startedAt) / Math.max(160, durationMs));
+    const count = Math.max(2, Math.ceil(progress * totalPoints));
+    editor.updateShape({
+      id,
+      type: "draw",
+      isLocked: progress >= 1,
+      props: { segments: toSegments(count), isComplete: progress >= 1 },
+    } as unknown as Parameters<Editor["updateShape"]>[0]);
     if (progress < 1) {
       frameId = window.requestAnimationFrame(frame);
     } else {
@@ -463,6 +758,15 @@ function traceStroke(
     if (frameId !== undefined) window.cancelAnimationFrame(frameId);
     if (editor.getShape(id)) editor.deleteShapes([id]);
   };
+}
+
+function shapeIntersectsBounds(shape: { x: number; y: number; props: object }, bounds: { x: number; y: number; w: number; h: number }) {
+  const props = shape.props as Record<string, unknown>;
+  const width = typeof props.w === "number" ? props.w : 80;
+  const height = typeof props.h === "number" ? props.h : 80;
+  const right = shape.x + width;
+  const bottom = shape.y + height;
+  return shape.x < bounds.x + bounds.w && right > bounds.x && shape.y < bounds.y + bounds.h && bottom > bounds.y;
 }
 
 function clamp(value: number) {
